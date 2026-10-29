@@ -1,0 +1,12 @@
+{
+  "name": "stair-ai",
+  "owner": { "name": "Stair AI" },
+  "description": "Stair AI plugins: write your agent's behavior into a Reasoning Ledger you own.",
+  "plugins": [
+    {
+      "name": "stair",
+      "source": "./plugins/stair",
+      "description": "Keeps a record of your Claude Code sessions in a Reasoning Ledger you own, encrypted on your machine: tool calls, questions and answers, decisions, outcomes (schema 0.5). Nothing is asked of the model."
+    }
+  ]
+}

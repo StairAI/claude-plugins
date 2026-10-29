@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "PermissionRequest": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/stair\" hook PermissionRequest", "timeout": 5}]}],
+    "PermissionDenied": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/stair\" hook PermissionDenied", "timeout": 5}]}],
+    "SubagentStop": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/stair\" hook SubagentStop", "timeout": 5}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/stair\" hook Stop", "timeout": 5}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/stair\" hook SessionEnd", "timeout": 10}]}]
+  }
+}

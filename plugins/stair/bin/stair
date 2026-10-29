@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# stair: the launcher of the Stair plugin for Claude Code.
+#   stair rl <command>   the ledger: setup, status, viewer, flush, map, process, key, admin (the `rl` word may be left out)
+#   stair access …       identity and keys: not yet; for now the owner key and the content master key live under $STAIR_HOME
+#   stair hook <Event>   fast path, bash only: append the hook's JSON to the local queue; on Stop/SessionEnd start the
+#                        detached processor (which maps the transcript and uploads). Never blocks Claude Code for long.
+#   stair env            build (or rebuild) the plugin's own Python environment with the ledger SDK in it.
+#
+# Python resolution, in order: $STAIR_PYTHON; the plugin's own environment ($STAIR_HOME/venv, built by `stair env`
+# or on first `stair rl setup`); a development checkout of the ledger repository next to its SDK ($STAIR_SDK_SRC);
+# the machine's python3 (bootstrap only).
+set -u
+# The plugin's directory: where this launcher really is, through any symlink (the README links it into PATH).
+self="${BASH_SOURCE[0]}"
+while [ -L "$self" ]; do
+  link="$(readlink "$self")"
+  case "$link" in /*) self="$link" ;; *) self="$(dirname "$self")/$link" ;; esac
+done
+if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then ROOT="$CLAUDE_PLUGIN_ROOT"; else ROOT="$(cd "$(dirname "$self")/.." && pwd -P)"; fi
+HOME_DIR="${STAIR_HOME:-$HOME/.stair}"
+# An install made by the plugin's earlier name keeps its state: move it over once.
+if [ ! -e "$HOME_DIR" ] && [ -z "${STAIR_HOME:-}" ] && [ -d "$HOME/.stair-rl" ]; then mv "$HOME/.stair-rl" "$HOME_DIR" 2>/dev/null || true; fi
+VENV="$HOME_DIR/venv"
+DEV_SDK="${STAIR_SDK_SRC:-$HOME/work/rl-dev/Reasoning-Ledger/python-sdk/src}"
+# Where the SDK comes from when the plugin builds its own environment: a pip requirement (a release, a git ref,
+# or a local path to the python-sdk directory).
+SDK_SPEC="${STAIR_SDK_SPEC:-reasoning-ledger @ git+https://github.com/StairAI/Reasoning-Ledger.git@develop#subdirectory=python-sdk}"
+export STAIR_HOME="$HOME_DIR"
+PY=""
+if [ -n "${STAIR_PYTHON:-}" ] && [ -x "${STAIR_PYTHON}" ]; then PY="$STAIR_PYTHON"
+elif [ -x "$VENV/bin/python" ]; then PY="$VENV/bin/python"
+elif [ -d "$DEV_SDK" ] && [ -x "$(dirname "$DEV_SDK")/.venv/bin/python" ]; then
+  PY="$(dirname "$DEV_SDK")/.venv/bin/python"; export STAIR_SDK_SRC="$DEV_SDK" PYTHONPATH="$DEV_SDK${PYTHONPATH:+:$PYTHONPATH}"
+fi
+build_env() {   # the plugin's own environment: uv when present, python3 -m venv otherwise; needs Python 3.12+
+  mkdir -p "$HOME_DIR" || return 1
+  if command -v uv >/dev/null 2>&1; then
+    uv venv --quiet --python 3.12 "$VENV" && uv pip install --quiet --python "$VENV/bin/python" "$SDK_SPEC"
+  else
+    local base; base="$(command -v python3.12 || command -v python3 || true)"
+    [ -n "$base" ] || { echo "stair: no python3 found; install Python 3.12+ or uv" >&2; return 1; }
+    "$base" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' || { echo "stair: Python 3.12+ is required (found $("$base" --version 2>&1)); install it or uv" >&2; return 1; }
+    "$base" -m venv "$VENV" && "$VENV/bin/python" -m pip install --quiet --upgrade pip && "$VENV/bin/python" -m pip install --quiet "$SDK_SPEC"
+  fi && "$VENV/bin/python" -c 'import reasoning_ledger' && echo "stair: environment ready at $VENV" >&2
+}
+if [ "${1:-}" = "hook" ]; then
+  EVENT="${2:-unknown}"
+  [ -f "$HOME_DIR/config.json" ] || exit 0          # not set up: do nothing, never break the session
+  mkdir -p "$HOME_DIR/queue" "$HOME_DIR/logs" 2>/dev/null || exit 0   # the processor's log must have a directory, or the spawn below fails silently
+  PAYLOAD="$(cat)"                                   # the hook's JSON on stdin
+  TS="$(date +%s%3N)"
+  printf '{"event":"%s","ts":%s,"payload":%s}\n' "$EVENT" "$TS" "${PAYLOAD:-{\}}" >> "$HOME_DIR/queue/events.jsonl" 2>/dev/null
+  case "$EVENT" in
+    Stop|SessionEnd)
+      if [ -n "$PY" ] && [ -f "$ROOT/rl_plugin.py" ]; then
+        ( setsid nohup "$PY" -P "$ROOT/rl_plugin.py" process >> "$HOME_DIR/logs/process.log" 2>&1 < /dev/null & ) 2>/dev/null
+      fi ;;
+  esac
+  exit 0
+fi
+if [ "${1:-}" = "env" ]; then build_env; exit $?; fi
+if [ "${1:-}" = "access" ]; then echo "stair access: not yet. The owner key is $HOME_DIR/owner.key and the content master key is $HOME_DIR/master.key; back both up." >&2; exit 2; fi
+if [ "${1:-}" = "rl" ]; then shift; fi
+if [ -z "$PY" ] || ! "$PY" -c 'import reasoning_ledger' >/dev/null 2>&1; then
+  if [ "${1:-}" = "setup" ]; then build_env || exit 1; PY="$VENV/bin/python"
+  else echo "stair: the ledger SDK is not available; run \"$0 env\" (or \"$0 rl setup …\", which builds the environment first)" >&2; exit 1; fi
+fi
+[ -f "$ROOT/rl_plugin.py" ] || { echo "stair: plugin missing at $ROOT" >&2; exit 1; }
+exec "$PY" -P "$ROOT/rl_plugin.py" "$@"
