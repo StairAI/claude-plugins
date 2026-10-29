@@ -4,6 +4,12 @@ Installs in a minute, then keeps a record of every turn of every session in a Re
 
 ## Install (what the person does)
 
+The whole install is one message in a Claude Code session:
+
+> Install Stair for me: follow https://raw.githubusercontent.com/StairAI/claude-plugins/main/INSTALL.md. My invite code is STAIR-XXXXX-XXXXX.
+
+Claude installs the plugin, reads its code and says what it does, explains the privacy notice, asks for consent, and only then runs the setup (the instructions it follows are `INSTALL.md` in the public marketplace repository, which points at `commands/install.md` here). The same by hand:
+
 1. Add the marketplace and install the plugin, once per machine:
 
    ```bash
