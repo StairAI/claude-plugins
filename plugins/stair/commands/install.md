@@ -16,10 +16,10 @@ The plugin's directory is `${CLAUDE_PLUGIN_ROOT}`. If that is not an absolute pa
 4. **Set up.** Ask for the e-mail to register with, a short name for this machine (such as "work-laptop"), and the invite code if it was not given as the argument (`$ARGUMENTS`). Then run, with the real values:
 
    ```
-   "${CLAUDE_PLUGIN_ROOT}/bin/stair" rl setup --endpoint https://api.stair-ai.com --register EMAIL --agent-name NAME --invite CODE --accept-privacy-notice 2026-10-29
+   "${CLAUDE_PLUGIN_ROOT}/bin/stair" rl setup --register EMAIL --agent-name NAME --invite CODE --accept-privacy-notice 2026-10-29
    ```
 
-   It builds the plugin's Python environment (needs `uv` or Python 3.12+; `curl -LsSf https://astral.sh/uv/install.sh | sh` installs uv), creates the account, makes the keys, registers this machine and sends one probe record. Show the person the JSON line it prints. If it fails, show the error and stop; do not retry with other values on your own.
+   The ledger it writes to is this channel's default (`channel.env` in the plugin directory: the hosted ledger `api.stair-ai.com` for `stair`, the staging ledger for `stair-dev`); `--endpoint` overrides it. It builds the plugin's Python environment (needs `uv` or Python 3.12+; `curl -LsSf https://astral.sh/uv/install.sh | sh` installs uv), creates the account, makes the keys, registers this machine and sends one probe record. Show the person the JSON line it prints. If it fails, show the error and stop; do not retry with other values on your own.
 
 5. **Finish.** Tell them: back up `~/.stair/master.key` now (without it the content cannot be read); recording starts with the next session, or after `/reload-plugins`; `stair rl viewer` prints a one-time link to see their records, decrypted in the browser, and the link must not be shared because it carries their key. Offer to put the launcher on their PATH:
 

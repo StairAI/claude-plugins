@@ -91,6 +91,10 @@ Rewind and fork of a conversation are represented, not erased: see `../LEDGER_GU
 
 State: `$STAIR_HOME` (default `~/.stair`; an install made under the plugin's earlier name, `~/.stair-rl`, is moved over on first use): `config.json`, `owner.key`, `master.key`, `queue/events.jsonl`, `state/<transcript>.json` (what was uploaded), `spool.jsonl` (records the server rejected, with its reason, and records held back because their upstream failed; `stair rl flush` retries), `logs/`.
 
+## Channels: `stair` and `stair-dev`
+
+The same source builds two plugins that can be installed side by side. `stair`, from the public marketplace, is the release channel: it writes to the hosted ledger and its Python environment is pinned to a release of the ledger repository. `stair-dev`, installed from this repository (`claude plugin marketplace add git@github.com:StairAI/Reasoning-Ledger-Integrations.git`, then `claude plugin install stair-dev@stair-ai-dev`), is the dev channel: it writes to the staging ledger and follows the ledger repository's `develop` branch. Each keeps its state under `~/.<name>` (`~/.stair`, `~/.stair-dev`), its commands are namespaced by its name (`/stair:install`, `/stair-dev:install`), and with both installed every turn is recorded twice, each by its own code into its own ledger. The channel's defaults are `channel.env` in the plugin directory; `publish.sh` writes the release values into the published copy. To run code that is not pushed yet, `claude --plugin-dir ./claude-code` loads this directory for one session (disable the installed `stair-dev` first, or that turn is recorded by both).
+
 ## Limits of this version
 
 - The master key is one file on one machine. Back it up yourself; `stair access backup` is for a later version. A second machine of yours is a second agent with its own key (the ledger can hold several), not a copy of this one.

@@ -22,7 +22,27 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from mapper import Mapper, strip_none  # noqa: E402
 
-HOME = Path(os.environ.get("STAIR_HOME") or os.environ.get("RL_PLUGIN_HOME") or Path.home() / ".stair")
+def plugin_name():
+    """This copy's name from plugin.json: `stair` (the release channel) or `stair-dev` (the source repository)."""
+    try: return json.load(open(HERE / ".claude-plugin" / "plugin.json", encoding="utf-8")).get("name") or "stair"
+    except Exception: return "stair"
+
+def channel():
+    """The channel's defaults from channel.env beside this file: which ledger and which SDK, unless overridden."""
+    import shlex
+    out = {"STAIR_CHANNEL": "dev", "STAIR_DEFAULT_ENDPOINT": "https://stg-api.stair-ai.com"}
+    try:
+        for line in open(HERE / "channel.env", encoding="utf-8"):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1); out[k.strip()] = " ".join(shlex.split(v))
+    except Exception: pass
+    return out
+
+NAME = plugin_name()
+CHANNEL = channel()
+# Each channel keeps its state under ~/.<name>: ~/.stair for the release channel, ~/.stair-dev for the source.
+HOME = Path(os.environ.get("STAIR_HOME") or os.environ.get("RL_PLUGIN_HOME") or Path.home() / ("." + NAME))
 QUEUE = HOME / "queue" / "events.jsonl"
 BATCH = 50
 # The privacy notice (PRIVACY.md beside this file) a person accepts at setup. Bumped whenever the notice changes in
@@ -35,7 +55,7 @@ def plugin_version():
 
 # urllib's default User-Agent (Python-urllib/x.y) is refused by the browser-integrity check of the CDN in front of the hosted
 # ledger (Cloudflare error 1010), so the two direct requests below name the plugin instead. The SDK (httpx) names itself.
-USER_AGENT = "stair/" + plugin_version()
+USER_AGENT = NAME + "/" + plugin_version()
 
 def now_ms(): return int(time.time() * 1000)
 def log(where, err):
@@ -299,7 +319,7 @@ def status(args):
             enc = {"enabled": True, "error": "master key unreadable: %s" % str(e)[:120], "master_key_file": str(master_key_path(cfg))}
     print(json.dumps({"ok": bool(cfg) and "error" not in enc, "configured": bool(cfg), "endpoint": cfg and cfg.get("endpoint"), "agent_id": cfg and cfg.get("agent_id"),
                       "transcripts": len(states), "records_uploaded": up, "queued_events": q, "spooled": sp, "home": str(HOME), "encryption": enc,
-                      "privacy_notice": (cfg or {}).get("privacy_notice"), "plugin": plugin_version()}))
+                      "privacy_notice": (cfg or {}).get("privacy_notice"), "plugin": NAME + " " + plugin_version(), "channel": CHANNEL["STAIR_CHANNEL"]}))
     return 0
 
 def flush(args):
@@ -383,8 +403,7 @@ def admin_request(endpoint, token, method, path, body=None):
 def admin_cmd(args):
     """`admin invites new|list|revoke`: invite codes, with the ledger's administrator token (a file, never an argument)."""
     cfg = load_config() or {}
-    endpoint = (args.endpoint or cfg.get("endpoint") or "").rstrip("/")
-    if not endpoint: raise SystemExit("stair: give --endpoint, or run `stair rl setup` first")
+    endpoint = (args.endpoint or cfg.get("endpoint") or CHANNEL["STAIR_DEFAULT_ENDPOINT"]).rstrip("/")
     token = os.environ.get("STAIR_ADMIN_TOKEN") or os.environ.get("RL_ADMIN_TOKEN") or (open(os.path.expanduser(args.admin_token_file), encoding="utf-8").read().strip() if args.admin_token_file else "")
     if not token: raise SystemExit("stair: give --admin-token-file <file holding the administrator token> (or set STAIR_ADMIN_TOKEN)")
     if args.admin_cmd == "new":
@@ -416,7 +435,7 @@ def map_cmd(args):
 def main():
     ap = argparse.ArgumentParser(prog="stair rl"); sub = ap.add_subparsers(dest="cmd")
     p = sub.add_parser("process"); p.add_argument("--delay", type=float, default=1.5)
-    s = sub.add_parser("setup"); s.add_argument("--endpoint", required=True); s.add_argument("--agent-name", required=True)
+    s = sub.add_parser("setup"); s.add_argument("--endpoint", default=CHANNEL["STAIR_DEFAULT_ENDPOINT"], help="the ledger to write to (default: this channel's, %s)" % CHANNEL["STAIR_DEFAULT_ENDPOINT"]); s.add_argument("--agent-name", required=True)
     s.add_argument("--api-key-file", default=None, help="file holding the owner key you were given")
     s.add_argument("--register", default=None, metavar="EMAIL", help="create an owner on the ledger for this e-mail instead; the key is saved to $STAIR_HOME/owner.key")
     s.add_argument("--registration-token-file", default=None, help="for an instance without self-service: file holding its registration token (or set STAIR_REGISTRATION_TOKEN)")
@@ -435,7 +454,7 @@ def main():
     ad = sub.add_parser("admin", help="operator commands, with the ledger's administrator token"); adsub = ad.add_subparsers(dest="admin_cmd")
     for name in ("new", "list", "revoke"):
         sp = adsub.add_parser(name); sp.set_defaults(admin_cmd=name)
-        sp.add_argument("--endpoint", default=None); sp.add_argument("--admin-token-file", default=None, help="file holding the administrator token (or set STAIR_ADMIN_TOKEN)")
+        sp.add_argument("--endpoint", default=None, help="the ledger (default: the configured one, else this channel's)"); sp.add_argument("--admin-token-file", default=None, help="file holding the administrator token (or set STAIR_ADMIN_TOKEN)")
         if name == "new":
             sp.add_argument("--count", type=int, default=1); sp.add_argument("--max-uses", type=int, default=1); sp.add_argument("--note", default=None); sp.add_argument("--expires-in-days", type=int, default=None)
         if name == "list": sp.add_argument("--limit", type=int, default=200)
