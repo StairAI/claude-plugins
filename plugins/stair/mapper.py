@@ -60,6 +60,11 @@ def mem_scope(path):
     if "/skills/" in p or p.endswith("SKILL.md"): return "user"
     if "/.claude/" in p and ("settings" in p or "hooks" in p or "keybindings" in p): return "user"
     return None
+def claim_shape(sentence):
+    """What the ledger keeps of a verdict sentence found in the agent's own text: its length and digest. The sentence itself
+    is inside the record's output, which is content and travels encrypted."""
+    return {"sentence_chars": len(sentence), "sentence_sha256": sha(sentence)}
+
 def plan_steps(text):
     """A reply that lays out its plan as a numbered list: the steps, or None. Needs the word "plan" and two or more items."""
     if not text or not PLAN_WORD.search(text): return None
@@ -129,19 +134,24 @@ class Mapper:
         def narration_or_claim(text, ts, u, i, mi):
             steps = plan_steps(text)
             if steps:   # the reply laid out a numbered plan before acting on it
-                head = re.split(r"\n", text.strip(), 1)[0].strip().lstrip("#").strip()[:200] or "plan stated in the reply"
-                return self.base(sid, "Planning", ts, "ai", "post_execution", conf=0.6, tags=tags_turn, goal=head,
-                                 steps=[{"index": j, "description": d} for j, d in enumerate(steps)], outcome="success", model_invocation=mi,
+                # Structure only in the Planning record (the ledger can read it); the plan's text travels encrypted,
+                # as the output of a companion Thinking record that the plan points at.
+                said = self.base(sid, "Thinking", ts, "ai", "post_execution", conf=0.6, tags=tags_turn, output_payload=text, outcome="success",
+                                 model_invocation=mi, record_id=rid(self.agent_id, u, "plan-said", i))
+                plan = self.base(sid, "Planning", ts, "ai", "post_execution", conf=0.6, tags=tags_turn, goal="plan stated in the reply, %d chars" % len(text),
+                                 steps=[{"index": j, "description": "step %d, %d chars" % (j + 1, len(d))} for j, d in enumerate(steps)], outcome="success",
                                  record_id=rid(self.agent_id, u, "plan-text", i))
+                plan["upstream_record_id"] = [said["record_id"]]; plan["_before"] = [said]
+                return plan
             s = first_sentence(text, VERDICT)
             if s:
                 return self.base(sid, "Reflecting", ts, "ai", "concurrent", conf=0.5, tags=tags_turn, kind="evaluation",
-                                 inputs=[], output_payload=text, verdict={"conclusion": s, "decided_by": "model"}, outcome="success", model_invocation=mi,
+                                 inputs=[], output_payload=text, verdict={"conclusion": claim_shape(s), "decided_by": "model"}, outcome="success", model_invocation=mi,
                                  record_id=rid(self.agent_id, u, "claim", i))
             s = first_sentence(text, DECISION)
             if s:
                 return self.base(sid, "Thinking", ts, "ai", "post_execution", conf=0.5, tags=tags_turn, output_payload=text,
-                                 verdict={"conclusion": s, "decided_by": "model"}, outcome="success", model_invocation=mi, record_id=rid(self.agent_id, u, "claim", i))
+                                 verdict={"conclusion": claim_shape(s), "decided_by": "model"}, outcome="success", model_invocation=mi, record_id=rid(self.agent_id, u, "claim", i))
             return self.base(sid, "Other", ts, "ai", "post_execution", tags=tags_turn, label="assistant.narration", data={"chars": len(text)},
                              proposed_behavior="Reporting", record_id=rid(self.agent_id, u, "narr", i))
         def flush_text():
@@ -261,7 +271,10 @@ class Mapper:
                 elif k == "text" and (x.get("text") or "").strip():
                     if last_text is not None:
                         r = narration_or_claim(last_text, last_text_ts, last_text_uuid, 0, last_text_mi)
-                        if prev: r["upstream_record_id"] = prev[-1:]
+                        for c in r.pop("_before", []):
+                            if prev: c["upstream_record_id"] = prev[-1:]
+                            out.append(c); prev.append(c["record_id"])
+                        if prev and "upstream_record_id" not in r: r["upstream_record_id"] = prev[-1:]
                         out.append(r); prev.append(r["record_id"])
                     last_text, last_text_ts, last_text_uuid, last_text_mi = x.get("text"), ts, "%s-%d" % (u, i), mi
                 elif k == "tool_use":
@@ -270,7 +283,10 @@ class Mapper:
                         tool_use[tid] = {"kind": "skip"}; continue
                     if last_text is not None:
                         r = narration_or_claim(last_text, last_text_ts, last_text_uuid, 0, last_text_mi)
-                        if prev: r["upstream_record_id"] = prev[-1:]
+                        for c in r.pop("_before", []):
+                            if prev: c["upstream_record_id"] = prev[-1:]
+                            out.append(c); prev.append(c["record_id"])
+                        if prev and "upstream_record_id" not in r: r["upstream_record_id"] = prev[-1:]
                         out.append(r); prev.append(r["record_id"]); last_text = None
                     up = prev[-1:]
                     perm = None
@@ -292,7 +308,7 @@ class Mapper:
                                         awaited=False, record_id=rid(self.agent_id, tid, "tool"), **common); kind = "delegate"
                     elif name == "AskUserQuestion":
                         qs = inp.get("questions") or []; opts = [o.get("label") for q in qs for o in (q.get("options") or []) if isinstance(o, dict) and o.get("label")]
-                        rec = self.base(sid, "Escalating", ts, "ai", "pre_execution", kind="question", asked=qs, options=opts[:32], record_id=rid(self.agent_id, tid, "tool"), **common); kind = "ask"
+                        rec = self.base(sid, "Escalating", ts, "ai", "pre_execution", kind="question", asked=qs, record_id=rid(self.agent_id, tid, "tool"), **common); kind = "ask"
                     elif name in WRITE and mem_scope(str(inp.get("file_path") or "")):
                         written = inp.get("content") or inp.get("new_string") or ""
                         rec = self.base(sid, "Memorizing", ts, "ai", "post_execution", conf=0.8, scope=mem_scope(str(inp.get("file_path"))),
@@ -300,9 +316,15 @@ class Mapper:
                                         record_id=rid(self.agent_id, tid, "tool"), **common); kind = "memorize"
                     elif name in PLAN:
                         todos = inp.get("todos") or inp.get("items") or []
-                        steps = [{"index": j, "description": str((td.get("content") if isinstance(td, dict) else td) or "step")[:200]} for j, td in enumerate(todos)] if isinstance(todos, list) else []
-                        rec = self.base(sid, "Planning", ts, "ai", "post_execution", goal="plan via %s" % name,
-                                        steps=steps or [{"index": 0, "description": "plan"}], model_invocation=mi, record_id=rid(self.agent_id, tid, "tool"), **common); kind = "plan"
+                        steps = [{"index": j, "description": "step %d, %d chars" % (j + 1, len(str((td.get("content") if isinstance(td, dict) else td) or "")))} for j, td in enumerate(todos)] if isinstance(todos, list) else []
+                        # The text of the plan is the call's input, carried encrypted by a ToolCalling record; the Planning
+                        # record that points at it holds only the shape of the plan.
+                        call = self.base(sid, "ToolCalling", ts, "ai", "post_execution", tool_meta={"name": name, "call_id": tid, "tool_type": "function"}, input_payload=inp,
+                                         effect="write", model_invocation=mi, record_id=rid(self.agent_id, tid, "call"), **common)
+                        if up: call["upstream_record_id"] = up
+                        out.append(call); prev.append(call["record_id"]); tool_use[tid] = {"rec": call, "kind": "tool", "ts": ts, "inp": inp, "perm": perm, "verify": False, "options": []}
+                        rec = self.base(sid, "Planning", ts, "ai", "post_execution", goal="plan via %s, %d steps" % (name, len(steps)),
+                                        steps=steps or [{"index": 0, "description": "plan"}], outcome="success", record_id=rid(self.agent_id, tid, "tool"), **common); kind = "plan"
                     else:
                         tt = "mcp" if str(name).startswith("mcp__") else "shell" if name == "Bash" else "skill" if name == "Skill" else "function"
                         tm = {"name": name, "call_id": tid, "tool_type": tt}
@@ -311,6 +333,8 @@ class Mapper:
                         payload = file_pointer(self.device, inp.get("file_path"), inp.get("content") or inp.get("new_string")) if name in WRITE else inp
                         rec = self.base(sid, "ToolCalling", ts, "ai", "post_execution", tool_meta={a: b for a, b in tm.items() if b}, input_payload=payload,
                                         effect=eff, model_invocation=mi, record_id=rid(self.agent_id, tid, "tool"), **common); kind = "tool"
+                    if kind == "plan":
+                        rec["upstream_record_id"] = [call["record_id"]]; out.append(rec); prev.append(rec["record_id"]); continue
                     if up: rec["upstream_record_id"] = up
                     out.append(rec)
                     tool_use[tid] = {"rec": rec, "kind": kind, "ts": ts, "inp": inp, "perm": perm,

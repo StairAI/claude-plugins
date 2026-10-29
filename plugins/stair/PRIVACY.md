@@ -10,9 +10,9 @@ Every turn of every Claude Code session on this machine, from the transcript Cla
 - each tool call: the tool's name, what it was given, what it returned, how long it took, whether it succeeded;
 - questions Claude asked you and your answers; permission prompts and what you did with them;
 - sub-agents Claude started and what they were asked;
-- plan steps, and writes to memory files, CLAUDE.md, skills and settings;
+- plans (how many steps, how long each; the words of the plan are content, below) and writes to memory files, CLAUDE.md, skills and settings;
 - thinking blocks, as a fingerprint only (size and hash); their text never leaves this machine;
-- file writes, as a pointer (path and hash); the file's content never leaves this machine.
+- file writes, as a pointer (path and hash), carried as content; the file's content never leaves this machine.
 
 The hooks do not read anything else on this machine. Nothing is asked of the model: it does not know it is being recorded and is not asked to record anything.
 
@@ -20,9 +20,9 @@ The hooks do not read anything else on this machine. Nothing is asked of the mod
 
 Records go to one place: the ledger endpoint you give at setup (the hosted ledger `api.stair-ai.com`, run by Stair AI, unless you point it elsewhere). Before upload, the text of each record is encrypted on this machine with a key that is made here and stays here (`~/.stair/master.key`). The ledger stores the ciphertext and a wrapped per-session key it cannot open.
 
-So the ledger, and the people who run it, can see the **structure** of your work: that a prompt came in, which tools were called in what order, how long they took, whether they succeeded, token counts, timestamps, the names of tools and the paths of files that were written. They **cannot** see the text: not your prompts, not the answers, not what tools were given or returned, not what was asked or delegated.
+So the ledger, and the people who run it, can see the **structure** of your work: that a prompt came in, which tools were called in what order, how long they took, whether they succeeded, token counts, timestamps, the names of tools, how many characters each text had, how many steps a plan had, what kind of question or permission was raised, the class of an error, the type of a sub-agent. They **cannot** see the words: not your prompts, not the answers, not what tools were given or returned, not what was asked, the options offered or what was delegated, not the wording of a plan or a verdict, not file paths or memory targets (those are pointers, carried as content). The plugin's tests check that no word of a session appears outside the encrypted positions.
 
-If a file path or a tool name is itself something you must not share (a client's repository, say), keep the plugin off that machine.
+If a tool's name is itself something you must not share, or the shape of your work is, keep the plugin off that machine.
 
 ## What you can do
 
