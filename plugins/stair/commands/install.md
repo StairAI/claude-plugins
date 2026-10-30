@@ -13,15 +13,15 @@ The plugin's directory is `${CLAUDE_PLUGIN_ROOT}`. If that is not an absolute pa
 
 3. **Ask for consent explicitly.** Ask one question: do they accept the notice (version `2026-10-29`) and want recording to start with their next session? Use AskUserQuestion when it is available; otherwise ask in the message and wait. Without a clear yes, stop; nothing is installed further and nothing has been sent.
 
-4. **Set up.** Ask for the e-mail to register with, a short name for this machine (such as "work-laptop"), and the invite code if it was not given as the argument (`$ARGUMENTS`). Then run, with the real values:
+4. **Set up.** Ask for a short name for this machine (such as "work-laptop") and the invite code if it was not given as the argument (`$ARGUMENTS`). No e-mail is needed: the account is anonymous and its keys are its identity; they can add an e-mail later with `stair rl claim you@example.com` so the account can be found again. Then run, with the real values:
 
    ```
-   "${CLAUDE_PLUGIN_ROOT}/bin/stair" rl setup --register EMAIL --agent-name NAME --invite CODE --accept-privacy-notice 2026-10-29
+   "${CLAUDE_PLUGIN_ROOT}/bin/stair" rl setup --agent-name NAME --invite CODE --accept-privacy-notice 2026-10-29
    ```
 
    The ledger it writes to is this channel's default (`channel.env` in the plugin directory: the hosted ledger `api.stair-ai.com` for `stair`, the staging ledger for `stair-dev`); `--endpoint` overrides it. It builds the plugin's Python environment (needs `uv` or Python 3.12+; `curl -LsSf https://astral.sh/uv/install.sh | sh` installs uv), creates the account, makes the keys, registers this machine and sends one probe record. Show the person the JSON line it prints. If it fails, show the error and stop; do not retry with other values on your own.
 
-5. **Finish.** Tell them: back up `~/.stair/master.key` now (without it the content cannot be read); recording starts with the next session, or after `/reload-plugins`; `stair rl viewer` prints a one-time link to see their records, decrypted in the browser, and the link must not be shared because it carries their key. Offer to put the launcher on their PATH:
+5. **Finish.** Tell them: back up `~/.stair/master.key` and `~/.stair/owner.key` now (the keys are the account; without the master key the content cannot be read); recording starts with the next session, or after `/reload-plugins`; `stair rl viewer` prints a one-time link to see their records, decrypted in the browser, and the link must not be shared because it carries their key; `stair rl claim you@example.com` attaches an e-mail whenever they want one. Offer to put the launcher on their PATH:
 
    ```
    ln -sf "${CLAUDE_PLUGIN_ROOT}/bin/stair" ~/.local/bin/stair

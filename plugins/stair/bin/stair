@@ -53,6 +53,10 @@ build_env() {   # the plugin's own environment: uv when present, python3 -m venv
 if [ "${1:-}" = "hook" ]; then
   EVENT="${2:-unknown}"
   [ -f "$HOME_DIR/config.json" ] || exit 0          # not set up: do nothing, never break the session
+  if [ "$EVENT" = "SessionStart" ]; then           # say what the makers left for the person (rl_plugin.py refresh_notices), once
+    if [ -f "$HOME_DIR/notice.pending.json" ]; then cat "$HOME_DIR/notice.pending.json"; mv -f "$HOME_DIR/notice.pending.json" "$HOME_DIR/notice.shown.json" 2>/dev/null; fi
+    exit 0
+  fi
   mkdir -p "$HOME_DIR/queue" "$HOME_DIR/logs" 2>/dev/null || exit 0   # the processor's log must have a directory, or the spawn below fails silently
   PAYLOAD="$(cat)"                                   # the hook's JSON on stdin
   TS="$(date +%s%3N)"

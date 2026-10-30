@@ -185,7 +185,11 @@ def process_transcript(cfg, transcript, payload, st, dry=False):
 
 def process(args):
     cfg = load_config()
-    if not cfg or not QUEUE.exists(): return 0
+    if not cfg: return 0
+    paused = uploads_paused(cfg, fetch_notices(cfg))
+    if paused:   # the queue keeps growing; nothing leaves this machine until the new notice is accepted
+        log("paused", "privacy notice %s not accepted yet" % paused.get("privacy_notice_version")); refresh_notices(cfg); return 0
+    if not QUEUE.exists(): refresh_notices(cfg); return 0
     time.sleep(args.delay)   # the transcript is written asynchronously and may lag the Stop hook by a moment
     lines = [l for l in open(QUEUE, encoding="utf-8") if l.strip()]
     open(QUEUE, "w").close()
@@ -211,6 +215,7 @@ def process(args):
         except Exception as e:
             log("process", e); save_state(st)
     if summary: print(json.dumps(summary, ensure_ascii=False))
+    refresh_notices(cfg)
     return 0
 
 
@@ -219,7 +224,8 @@ def register_owner(endpoint, email, token=None, invite=None):
     instance allows it (RL_REGISTRATION=open, or =invite with an invite code); elsewhere the instance's registration token
     goes in X-Admin-Token."""
     import urllib.request, urllib.error
-    fields = {"email": email, "wallet_mode": "custodial"}
+    fields = {"wallet_mode": "custodial"}
+    if email: fields["email"] = email          # optional: without it the owner is anonymous, its keys its identity
     if invite: fields["invite_code"] = invite.strip()
     body = json.dumps(fields).encode("utf-8")
     headers = {"content-type": "application/json", "user-agent": USER_AGENT}
@@ -232,6 +238,7 @@ def register_owner(endpoint, email, token=None, invite=None):
         try: detail = json.loads(detail).get("message") or detail
         except Exception: pass
         hint = " (pass --invite <code>)" if e.code == 403 and "invite" in detail.lower() and not invite else ""
+        if e.code == 400 and "email" in detail.lower() and not email: hint = " (this ledger still asks for an e-mail: add --register you@example.com)"
         raise SystemExit("stair: registration refused (%d): %s%s" % (e.code, detail, hint))
     key = r.get("api_key")
     if not key: raise SystemExit("stair: the ledger already has an owner with this e-mail and did not return its key; use --api-key-file with the key you were given")
@@ -269,16 +276,22 @@ def setup(args):
     HOME.mkdir(parents=True, exist_ok=True)
     previous = load_config() or {}
     invite = getattr(args, "invite", None) or os.environ.get("STAIR_INVITE_CODE") or previous.get("invite_code")
-    if args.register:
+    key_path = HOME / "owner.key"; email = (getattr(args, "register", None) or "").strip() or None
+    if getattr(args, "register", None) is None and args.api_key_file:
+        pass                                       # a key the person was given
+    elif getattr(args, "register", None) is not None or not key_path.exists():
+        # Register: anonymously unless an e-mail is given (--register you@example.com). The keys are the identity; an
+        # e-mail can be claimed later with `stair rl claim`.
         token = os.environ.get("STAIR_REGISTRATION_TOKEN") or os.environ.get("RL_REGISTRATION_TOKEN") or (open(os.path.expanduser(args.registration_token_file), encoding="utf-8").read().strip() if args.registration_token_file else None)
-        key_path = HOME / "owner.key"
         if key_path.exists() and not args.force:
-            raise SystemExit("stair: %s exists; pass --api-key-file %s to keep using it, or --force to replace it" % (key_path, key_path))
-        save_key(key_path, register_owner(args.endpoint, args.register, token, invite)); args.api_key_file = str(key_path)
-    elif not args.api_key_file:
-        raise SystemExit("stair: give --api-key-file <file holding your owner key>, or --register <e-mail> to create an owner on the ledger")
+            raise SystemExit("stair: %s exists; leave out --register to keep using it, --api-key-file %s to say so, or --force to replace it" % (key_path, key_path))
+        save_key(key_path, register_owner(args.endpoint, email, token, invite)); args.api_key_file = str(key_path)
+    else:
+        args.api_key_file = str(key_path)          # set up again on a machine that already has its owner key
     cfg = {"endpoint": args.endpoint.rstrip("/"), "api_key_file": args.api_key_file, "agent_name": args.agent_name, "sdk_src": args.sdk_src, "device": device_info(),
            "privacy_notice": {"version": PRIVACY_NOTICE_VERSION, "accepted_at": now_ms()}}
+    if email: cfg["owner_email"] = email
+    elif previous.get("owner_email"): cfg["owner_email"] = previous["owner_email"]
     if invite: cfg["invite_code"] = invite.strip()   # kept, so a later setup on this machine does not ask for it again
     if getattr(args, "viewer_url", None): cfg["viewer_url"] = args.viewer_url.rstrip("/")
     sys.path.insert(0, cfg["sdk_src"])
@@ -298,7 +311,7 @@ def setup(args):
     ok, failed = upload(cfg, [probe])
     print(json.dumps({"ok": not failed, "agent_id": aid, "endpoint": cfg["endpoint"], "home": str(HOME), "device_id": cfg["device"]["device_id"],
                       "encryption": "on" if master_id else "off", "master_key_id": master_id, "master_key_file": cfg.get("master_key_file"),
-                      "privacy_notice_accepted": PRIVACY_NOTICE_VERSION,
+                      "privacy_notice_accepted": PRIVACY_NOTICE_VERSION, "owner": cfg.get("owner_email") or "anonymous",
                       **({"error": failed[0]["error"]} if failed else {})}))
     return 0 if not failed else 1
 
@@ -319,7 +332,8 @@ def status(args):
             enc = {"enabled": True, "error": "master key unreadable: %s" % str(e)[:120], "master_key_file": str(master_key_path(cfg))}
     print(json.dumps({"ok": bool(cfg) and "error" not in enc, "configured": bool(cfg), "endpoint": cfg and cfg.get("endpoint"), "agent_id": cfg and cfg.get("agent_id"),
                       "transcripts": len(states), "records_uploaded": up, "queued_events": q, "spooled": sp, "home": str(HOME), "encryption": enc,
-                      "privacy_notice": (cfg or {}).get("privacy_notice"), "plugin": NAME + " " + plugin_version(), "channel": CHANNEL["STAIR_CHANNEL"]}))
+                      "privacy_notice": (cfg or {}).get("privacy_notice"), "owner": (cfg or {}).get("owner_email") or ("anonymous" if cfg else None),
+                      "plugin": NAME + " " + plugin_version(), "channel": CHANNEL["STAIR_CHANNEL"], "notice_pending": NOTICE_PENDING.exists()}))
     return 0
 
 def flush(args):
@@ -361,6 +375,142 @@ def viewer(args):
     else:
         print(url); print(f"one-time link, valid for {secs} s" + ("; it carries your content key, so share the link with nobody" if carries_key else ""))
     return 0
+
+def owner_request(cfg, method, path, body=None):
+    """A request to the ledger as this owner, outside the SDK (the few owner-account calls)."""
+    import urllib.request, urllib.error
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(cfg["endpoint"].rstrip("/") + path, data=data, method=method,
+                                 headers={"content-type": "application/json", "x-api-key": api_key(cfg), "user-agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as res: return json.loads(res.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:300]
+        try: detail = json.loads(detail).get("message") or detail
+        except Exception: pass
+        raise SystemExit("stair: the ledger answered %d: %s" % (e.code, detail))
+
+def claim(args):
+    """`claim EMAIL`: give this anonymous owner an e-mail, so the account can be found again and, later, recovered."""
+    cfg = load_config()
+    if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
+    r = owner_request(cfg, "PATCH", "/v1/owners/me", {"email": args.email.strip()})
+    cfg["owner_email"] = r.get("email") or args.email.strip(); json.dump(cfg, open(HOME / "config.json", "w", encoding="utf-8"), indent=1)
+    print(json.dumps({"ok": True, "owner_id": r.get("owner_id"), "email": cfg["owner_email"]})); return 0
+
+# ---------------------------------------------------------------- notices: what the plugin's makers want the person to know
+NOTICES_FILE = HOME / "notices.json"              # what was fetched, when, and which notices were shown
+NOTICE_PENDING = HOME / "notice.pending.json"      # the next SessionStart hook prints this and renames it
+NOTICE_SHOWN = HOME / "notice.shown.json"
+NOTICES_EVERY_MS = 60 * 60 * 1000
+
+def version_tuple(v):
+    try: return tuple(int(x) for x in str(v).split("-")[0].split("."))
+    except Exception: return (0,)
+
+def fetch_notices(cfg, force=False):
+    """Fetch the channel's notices file (a public, static JSON beside the published plugin) at most hourly; never raises."""
+    url = CHANNEL.get("STAIR_NOTICES_URL") or ""
+    if not url: return None
+    cache = {}
+    try: cache = json.load(open(NOTICES_FILE, encoding="utf-8"))
+    except Exception: pass
+    if not force and now_ms() - (cache.get("fetched_at") or 0) < NOTICES_EVERY_MS: return cache
+    import urllib.request
+    try:
+        req = urllib.request.Request(url, headers={"user-agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=5) as res: fetched = json.loads(res.read().decode("utf-8"))
+        cache = {"fetched_at": now_ms(), "url": url, "notices": fetched.get("notices") or [], "latest_version": fetched.get("latest_version") or {},
+                 "seen": cache.get("seen") or []}
+        NOTICES_FILE.parent.mkdir(parents=True, exist_ok=True); json.dump(cache, open(NOTICES_FILE, "w", encoding="utf-8"), indent=1)
+    except Exception as e:
+        log("notices", e)
+    return cache or None
+
+def mark_shown():
+    """The SessionStart hook renamed the pending file after printing it: record those notices as seen."""
+    if not NOTICE_SHOWN.exists(): return
+    try:
+        shown = json.load(open(NOTICE_SHOWN, encoding="utf-8")); cache = json.load(open(NOTICES_FILE, encoding="utf-8"))
+        cache["seen"] = sorted(set(cache.get("seen") or []) | set(shown.get("ids") or [])); json.dump(cache, open(NOTICES_FILE, "w", encoding="utf-8"), indent=1)
+    except Exception as e: log("notices-shown", e)
+    try: NOTICE_SHOWN.unlink()
+    except Exception: pass
+
+def pending_notices(cfg, cache):
+    """Which notices apply to this install and were not shown yet: an update when the published version is newer, a
+    privacy notice newer than the one accepted (uploads pause until it is), and plain messages."""
+    if not cache: return []
+    seen = set(cache.get("seen") or []); out = []
+    latest = (cache.get("latest_version") or {}).get(NAME)
+    installed = plugin_version()
+    if latest and version_tuple(latest) > version_tuple(installed):
+        out.append({"id": "update:%s" % latest, "kind": "update", "title": "%s %s is available (you have %s)" % (NAME, latest, installed)})
+    accepted = ((cfg or {}).get("privacy_notice") or {}).get("version") or ""
+    for n in cache.get("notices") or []:
+        nid = n.get("id")
+        if not nid or nid in seen: continue
+        if n.get("until") and str(n["until"]) < time.strftime("%Y-%m-%d"): continue
+        if n.get("channel") and n["channel"] != CHANNEL["STAIR_CHANNEL"]: continue
+        if n.get("kind") == "privacy" and n.get("privacy_notice_version") and str(n["privacy_notice_version"]) <= accepted: continue
+        out.append(n)
+    return [n for n in out if n["id"] not in seen]
+
+def uploads_paused(cfg, cache):
+    """Uploads stop when the makers published a privacy notice newer than the one this person accepted."""
+    accepted = ((cfg or {}).get("privacy_notice") or {}).get("version") or ""
+    for n in (cache or {}).get("notices") or []:
+        if n.get("kind") == "privacy" and n.get("privacy_notice_version") and str(n["privacy_notice_version"]) > accepted: return n
+    return None
+
+def render_pending(pending, paused):
+    """What the SessionStart hook prints: a line for the person, and context for the assistant, who asks before acting."""
+    if not pending and not paused: return None
+    lines = []; ctx = ["Stair plugin (%s) notices for this machine. Tell the person in one or two lines; ask before running anything." % NAME]
+    for n in pending:
+        kind = n.get("kind"); title = n.get("title") or n.get("id"); text = n.get("text") or ""
+        if kind == "update":
+            lines.append("Stair: " + title + ". Say \"update stair\" to update.")
+            ctx.append("Update available: %s. If they want it, run `claude plugin update %s@%s` and then suggest /reload-plugins." % (title, NAME, "stair-ai-dev" if NAME == "stair-dev" else "stair-ai"))
+        elif kind == "privacy":
+            lines.append("Stair: the privacy notice changed (%s); recording is paused until you accept it." % n.get("privacy_notice_version"))
+            ctx.append("Privacy notice changed to version %s: %s Uploads are paused until accepted. Update the plugin if the installed PRIVACY.md is older, read PRIVACY.md to the person in their language, ask for consent, and only with a clear yes run `%s rl accept-notice %s`." % (n.get("privacy_notice_version"), text, NAME, n.get("privacy_notice_version")))
+        else:
+            lines.append("Stair: " + title + (": " + text if text else ""))
+            ctx.append("Message from the makers: %s %s" % (title, text))
+    if paused and not any(n.get("kind") == "privacy" for n in pending):
+        lines.append("Stair: recording is paused until the new privacy notice (%s) is accepted." % paused.get("privacy_notice_version"))
+    return {"ids": [n["id"] for n in pending], "systemMessage": " ".join(lines),
+            "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "\n".join(ctx)}}
+
+def refresh_notices(cfg, force=False):
+    """After an upload run: record what was shown, fetch, and leave what should be said next for the SessionStart hook."""
+    mark_shown()
+    cache = fetch_notices(cfg, force=force)
+    out = render_pending(pending_notices(cfg, cache), uploads_paused(cfg, cache))
+    if out:
+        NOTICE_PENDING.parent.mkdir(parents=True, exist_ok=True); json.dump(out, open(NOTICE_PENDING, "w", encoding="utf-8"), indent=1)
+    elif NOTICE_PENDING.exists():
+        NOTICE_PENDING.unlink()
+    return out
+
+def notices_cmd(args):
+    cfg = load_config() or {}
+    cache = fetch_notices(cfg, force=args.fetch) or {}
+    print(json.dumps({"ok": True, "fetched_at": cache.get("fetched_at"), "latest_version": cache.get("latest_version"), "installed": NAME + " " + plugin_version(),
+                      "pending": pending_notices(cfg, cache), "uploads_paused": bool(uploads_paused(cfg, cache)), "seen": cache.get("seen") or []}, ensure_ascii=False, indent=1))
+    return 0
+
+def accept_notice(args):
+    """`accept-notice VERSION`: the person read the current PRIVACY.md (its version must be the one installed) and accepts it."""
+    cfg = load_config()
+    if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
+    if args.version != PRIVACY_NOTICE_VERSION:
+        print(json.dumps({"ok": False, "error": "the installed plugin's notice is %s, not %s; update the plugin first, then read its PRIVACY.md" % (PRIVACY_NOTICE_VERSION, args.version)})); return 1
+    cfg["privacy_notice"] = {"version": PRIVACY_NOTICE_VERSION, "accepted_at": now_ms()}
+    json.dump(cfg, open(HOME / "config.json", "w", encoding="utf-8"), indent=1)
+    refresh_notices(cfg, force=True)
+    print(json.dumps({"ok": True, "privacy_notice": cfg["privacy_notice"], "uploads_paused": False})); return 0
 
 def key_cmd(args):
     """`key rotate`: a new master key. Every wrapped session key the ledger holds for this owner is unwrapped with the old
@@ -437,7 +587,7 @@ def main():
     p = sub.add_parser("process"); p.add_argument("--delay", type=float, default=1.5)
     s = sub.add_parser("setup"); s.add_argument("--endpoint", default=CHANNEL["STAIR_DEFAULT_ENDPOINT"], help="the ledger to write to (default: this channel's, %s)" % CHANNEL["STAIR_DEFAULT_ENDPOINT"]); s.add_argument("--agent-name", required=True)
     s.add_argument("--api-key-file", default=None, help="file holding the owner key you were given")
-    s.add_argument("--register", default=None, metavar="EMAIL", help="create an owner on the ledger for this e-mail instead; the key is saved to $STAIR_HOME/owner.key")
+    s.add_argument("--register", default=None, nargs="?", const="", metavar="EMAIL", help="create an owner on the ledger (the default when this machine has no owner key yet): anonymous, or for this e-mail; the key is saved to $STAIR_HOME/owner.key")
     s.add_argument("--registration-token-file", default=None, help="for an instance without self-service: file holding its registration token (or set STAIR_REGISTRATION_TOKEN)")
     s.add_argument("--force", action="store_true", help="with --register: replace an existing owner.key")
     s.add_argument("--invite", default=None, metavar="CODE", help="with --register on a ledger that registers by invitation: your invite code (or set STAIR_INVITE_CODE); kept in config.json")
@@ -451,6 +601,9 @@ def main():
     v.add_argument("--no-key", action="store_true", help="leave the content master key out of the link (encrypted content then stays encrypted in the viewer)")
     m = sub.add_parser("map"); m.add_argument("transcript"); m.add_argument("--conv", default=None); m.add_argument("--dump", default=None)
     k = sub.add_parser("key", help="the content master key"); k.add_argument("key_cmd", choices=["id", "rotate"])
+    c = sub.add_parser("claim", help="give this anonymous owner an e-mail"); c.add_argument("email")
+    n = sub.add_parser("notices", help="what the plugin's makers want you to know"); n.add_argument("--fetch", action="store_true", help="fetch now instead of using the hourly cache")
+    acc = sub.add_parser("accept-notice", help="accept the current privacy notice after reading PRIVACY.md"); acc.add_argument("version")
     ad = sub.add_parser("admin", help="operator commands, with the ledger's administrator token"); adsub = ad.add_subparsers(dest="admin_cmd")
     for name in ("new", "list", "revoke"):
         sp = adsub.add_parser(name); sp.set_defaults(admin_cmd=name)
@@ -461,7 +614,8 @@ def main():
         if name == "revoke": sp.add_argument("code")
     ad.add_argument("what", nargs="?", default="invites", help=argparse.SUPPRESS)
     a = ap.parse_args()
-    fn = {"process": process, "setup": setup, "status": status, "flush": flush, "map": map_cmd, "viewer": viewer, "key": key_cmd, "admin": admin_cmd}.get(a.cmd)
+    fn = {"process": process, "setup": setup, "status": status, "flush": flush, "map": map_cmd, "viewer": viewer, "key": key_cmd, "admin": admin_cmd,
+          "claim": claim, "notices": notices_cmd, "accept-notice": accept_notice}.get(a.cmd)
     if fn is None: ap.print_help(); return 1
     return fn(a)
 

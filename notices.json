@@ -1,0 +1,7 @@
+{
+  "_about": "What the plugin's makers want people to know. The plugin fetches this file at most hourly and says what applies at the start of the next session; the person decides. latest_version is filled by publish.sh. A notice: {id, kind: update|privacy|info, title, text, until?: YYYY-MM-DD, channel?: release|dev, privacy_notice_version?: for kind privacy}.",
+  "latest_version": {
+    "stair": "0.10.0"
+  },
+  "notices": []
+}

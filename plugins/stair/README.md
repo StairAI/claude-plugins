@@ -31,10 +31,10 @@ Claude installs the plugin, reads its code and says what it does, explains the p
 
    ```bash
    ln -sf "$HOME/.claude/plugins/cache/stair-ai/stair/$(ls ~/.claude/plugins/cache/stair-ai/stair | sort -V | tail -1)/bin/stair" ~/.local/bin/stair
-   stair rl setup --endpoint https://api.stair-ai.com --register you@example.com --agent-name "my-laptop" --invite STAIR-XXXXX-XXXXX --accept-privacy-notice 2026-10-29
+   stair rl setup --agent-name "my-laptop" --invite STAIR-XXXXX-XXXXX --accept-privacy-notice 2026-10-29
    ```
 
-   The setup builds the plugin's own Python environment (with `uv`, or Python 3.12+), creates your owner on the ledger with your invite code, makes your content master key, registers this machine as an agent and sends one probe record (which carries the notice version you accepted). Two files come out of it, both readable by you only and never printed or sent:
+   The setup builds the plugin's own Python environment (with `uv`, or Python 3.12+), creates your owner on the ledger with your invite code (anonymous: the keys are the identity; `--register you@example.com` registers with an e-mail instead, and `stair rl claim you@example.com` attaches one later), makes your content master key, registers this machine as an agent and sends one probe record (which carries the notice version you accepted). Two files come out of it, both readable by you only and never printed or sent:
 
    - `~/.stair/owner.key`, the key that writes to your account;
    - `~/.stair/master.key`, the key that encrypts your content. **Back this one up** (copy it somewhere safe): without it, nobody can read the content, you included.
@@ -55,9 +55,15 @@ Claude installs the plugin, reads its code and says what it does, explains the p
 | `stair rl viewer [--next /traces/…] [--no-key]` | A one-time sign-in link (see above) |
 | `stair rl flush` | Retry the records the server rejected or that waited for an upstream |
 | `stair rl map <transcript.jsonl>` | Dry run: map a transcript to records without uploading |
+| `stair rl claim you@example.com` | Attach an e-mail to this anonymous account (409 if another account has it) |
+| `stair rl notices [--fetch]` / `stair rl accept-notice <version>` | What the makers published for this install (a newer version, a changed privacy notice); accept the current `PRIVACY.md` after reading it, which resumes recording |
 | `stair rl key id` / `stair rl key rotate` | The content master key's id; or a new key, with every session key the ledger holds re-wrapped under it (the old key stays in `master.key.old`) |
 | `stair rl admin new --count 5 --note "…" --admin-token-file <file>` | Operators: make invite codes (`list`, `revoke <code>`); the administrator token is read from a file, never passed as an argument |
 | `stair env` | Rebuild the plugin's Python environment |
+
+## Notices from the makers
+
+The plugin checks a public file beside the published plugin (`notices.json` in `StairAI/claude-plugins`, `STAIR_NOTICES_URL` in `channel.env`) at most hourly, after an upload run, never from a hook. What applies to this install and was not shown yet, a newer published version, a privacy notice newer than the accepted one, or a message, is left in `~/.stair/notice.pending.json`; the `SessionStart` hook prints it once, as one line for the person (`systemMessage`) and context for Claude (`additionalContext`: relay it, ask before acting), and nothing interrupts a session in progress. A changed privacy notice pauses uploads (the queue keeps growing on the machine) until `stair rl accept-notice <version>` is run with the installed `PRIVACY.md`'s version, after the person has read it. `stair rl notices --fetch` shows the state now.
 
 ## How it works (the batch design)
 

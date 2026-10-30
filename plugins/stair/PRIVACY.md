@@ -24,12 +24,17 @@ So the ledger, and the people who run it, can see the **structure** of your work
 
 If a tool's name is itself something you must not share, or the shape of your work is, keep the plugin off that machine.
 
+## Who you are to the ledger
+
+Nobody, unless you say so. The account is anonymous: two keys made on this machine are its identity, and the ledger holds no e-mail for it unless you attach one (`stair rl claim you@example.com`), which you may do at any time or never. An attached e-mail lets you find the account again and, later, recover it; it is never used for anything else.
+
 ## What you can do
 
 - Look at your own records, decrypted in your browser: `stair rl viewer`. The link carries your key after `#`; the browser never sends it to the server.
 - Rotate your key: `stair rl key rotate`.
 - Stop recording: uninstall the plugin (`claude plugin uninstall stair@stair-ai`), or delete `~/.stair/config.json`. Records already uploaded stay in your account.
-- Ask for your account and its records to be deleted: write to colin@stair-ai.com. In this alpha there is no self-service deletion.
+- Ask for your account and its records to be deleted: write to colin@stair-ai.com with the `agent_id` that `stair rl status` prints (an anonymous account has nothing else to name it by). In this alpha there is no self-service deletion.
+- Hear from the makers: at the start of a session the plugin may show one line, a new version or a changed notice, taken from a public file it checks hourly. A changed privacy notice pauses recording until you accept the new one; nothing leaves this machine in the meantime.
 
 ## What is not there yet
 

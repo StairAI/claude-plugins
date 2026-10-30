@@ -20,14 +20,14 @@ The plugin is now at the newest directory under `~/.claude/plugins/cache/stair-a
 1. read the plugin's code (`bin/stair`, `hooks/hooks.json`, `rl_plugin.py`, `mapper.py`) and tell the person what it does, what it reads, and where it sends data;
 2. explain the privacy notice (`PRIVACY.md`) in the person's language, with its full meaning;
 3. ask for their consent to notice version `2026-10-29`, and stop without a clear yes;
-4. ask for their e-mail, a short name for this machine, and their invite code (they may have given it in their message), then run the setup command with `--accept-privacy-notice 2026-10-29`;
-5. tell them to back up `~/.stair/master.key`, that recording starts with the next session (or `/reload-plugins`), and that `stair rl viewer` opens their records.
+4. ask for a short name for this machine and their invite code (they may have given it in their message); no e-mail is needed, the account is anonymous and its keys are its identity; then run the setup command with `--accept-privacy-notice 2026-10-29`;
+5. tell them to back up `~/.stair/master.key` and `~/.stair/owner.key`, that recording starts with the next session (or `/reload-plugins`), that `stair rl viewer` opens their records, and that `stair rl claim you@example.com` attaches an e-mail whenever they want one.
 
 The endpoint is `https://api.stair-ai.com` unless the person says otherwise.
 
 ## 3. Finish
 
-Say in two lines what was done: the account that was created, the machine's agent name, and that nothing is read from the machine except the transcripts Claude Code writes. Offer to link the launcher into their PATH:
+Say in two lines what was done: that an anonymous account was created, the machine's agent name, and that nothing is read from the machine except the transcripts Claude Code writes. From then on, at the start of a session, the plugin may leave a one-line notice from its makers (a new version, a changed privacy notice); relay it and ask before acting on it. Offer to link the launcher into their PATH:
 
 ```
 ln -sf "$HOME/.claude/plugins/cache/stair-ai/stair/$(ls ~/.claude/plugins/cache/stair-ai/stair | sort -V | tail -1)/bin/stair" ~/.local/bin/stair
