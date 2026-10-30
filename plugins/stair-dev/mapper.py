@@ -441,9 +441,13 @@ class Mapper:
                                         tags=tags_turn + ([link_key(task)] if isinstance(task, str) and task.strip() else [])); kind = "delegate"
                     elif name == "SendMessage" or name.endswith("__send_message"):
                         msg = inp.get("message") or inp.get("content")
+                        # The recipient is named by what it is, never by its name (often a session's title, which is private):
+                        # a keyed fingerprint lets its owner group messages by recipient while the ledger cannot read it.
+                        to = str(inp.get("to") or inp.get("session_id") or "")
                         rec = self.base(sid, "Delegating", ts, "ai", "post_execution", kind="message", goal=msg or inp,
-                                        delegate_agent_id=str(inp.get("to") or inp.get("session_id") or "session")[:40], awaited=False, record_id=rid(self.agent_id, tid, "tool"),
-                                        tags=tags_turn + ([link_key(msg)] if isinstance(msg, str) and msg.strip() else [])); kind = "delegate"
+                                        delegate_agent_id="claude-code-peer",
+                                        awaited=False, record_id=rid(self.agent_id, tid, "tool"),
+                                        tags=tags_turn + ([link_key(msg)] if isinstance(msg, str) and msg.strip() else []) + (["to:" + fingerprint(norm_text(to).encode("utf-8"))[:16]] if to else [])); kind = "delegate"
                     elif name == "AskUserQuestion":
                         qs = inp.get("questions") or []; opts = [o.get("label") for q in qs for o in (q.get("options") or []) if isinstance(o, dict) and o.get("label")]
                         rec = self.base(sid, "Escalating", ts, "ai", "pre_execution", kind="question", asked=qs, record_id=rid(self.agent_id, tid, "tool"), **common); kind = "ask"

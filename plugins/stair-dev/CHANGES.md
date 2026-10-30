@@ -2,6 +2,18 @@
 
 What each version of the Stair plugin for Claude Code changes for the person using it, newest first. When a newer version is out, the plugin says so at the start of a session together with the entries between your version and the new one, and Claude tells you more when you ask. A line that starts with "You do:" is something you have to do; it is said first.
 
+## 0.12.1
+
+A message to another session no longer names its recipient, and the privacy notice says where the viewer's protection ends.
+
+- Privacy: a message sent to another session or agent no longer writes the recipient's name, often a session's title, where the ledger can read it; only a keyed fingerprint of it.
+- Privacy: the privacy notice is now version 2026-10-30.2. It adds that an assistant able to act in your browser can see what you open there. Recording pauses until you accept it.
+- You do: after updating, accept the privacy notice; Claude reads it to you and asks.
+- Privacy: records uploaded before 0.11.2 keep their plain fingerprints, since the ledger never rewrites a record. Fingerprints follow the master key, so after `stair rl key rotate` new records no longer match older ones.
+- After an update, the first session shows what the previous version left to say, such as a changed privacy notice, instead of skipping it.
+- On Linux the viewer opens a browser only when you run it yourself; run by an assistant, it says to run it in your own terminal.
+- `stair rl status` calls the SDK's own version number `sdk_package_version`, beside the pin that chose it (`sdk`).
+
 ## 0.12.0
 
 The viewer works by grants: each view is a limited, recorded authorization, and your master key stays on your machine.

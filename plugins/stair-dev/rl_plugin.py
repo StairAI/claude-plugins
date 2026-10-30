@@ -47,7 +47,7 @@ QUEUE = HOME / "queue" / "events.jsonl"
 BATCH = 25   # records per upload; with the longer read timeout below, a slow ledger no longer times a batch out
 # The privacy notice (PRIVACY.md beside this file) a person accepts at setup. Bumped whenever the notice changes in
 # substance; setup then asks again.
-PRIVACY_NOTICE_VERSION = "2026-10-30.1"
+PRIVACY_NOTICE_VERSION = "2026-10-30.2"
 
 def plugin_version():
     try: return json.load(open(HERE / ".claude-plugin" / "plugin.json", encoding="utf-8")).get("version") or "0"
@@ -390,7 +390,7 @@ def status(args):
     environment = {"python": sys.executable, "own": bool(venv) and sys.executable.startswith(venv), "sdk": os.environ.get("STAIR_SDK_SPEC_WANTED")}
     try:
         from importlib.metadata import version as dist_version
-        environment["sdk_version"] = dist_version("reasoning-ledger")
+        environment["sdk_package_version"] = dist_version("reasoning-ledger")   # the package's own number; `sdk` is the pin that chose it
     except Exception: pass
     cmd = Path.home() / ".local" / "bin" / NAME
     command = {"path": str(cmd), "kind": "absent"}
@@ -430,7 +430,9 @@ def how_to_show():
     import shutil
     remote = bool(os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"))
     if not remote and sys.platform == "darwin" and shutil.which("open"): return "open"
-    if not remote and sys.platform.startswith("linux") and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) and shutil.which("xdg-open"):
+    # On Linux a display is often a machine's virtual screen, driven by an assistant's browser: open one only for a person.
+    if not remote and sys.platform.startswith("linux") and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) and shutil.which("xdg-open") \
+            and sys.stdin.isatty():
         return "open"
     if sys.stdout.isatty() and sys.stdin.isatty(): return "print"
     return None
@@ -590,13 +592,14 @@ def version_tuple(v):
     try: return tuple(int(x) for x in str(v).split("-")[0].split("."))
     except Exception: return (0,)
 
-def fetch_notices(cfg, force=False):
+def fetch_notices(cfg, force=False, offline=False):
     """Fetch the channel's notices file (a public, static JSON beside the published plugin) at most hourly; never raises."""
     url = CHANNEL.get("STAIR_NOTICES_URL") or ""
     if not url: return None
     cache = {}
     try: cache = json.load(open(NOTICES_FILE, encoding="utf-8"))
     except Exception: pass
+    if offline: return cache or None   # what was last fetched, without the network (the SessionStart hook)
     if not force and cache.get("url") == url and now_ms() - (cache.get("fetched_at") or 0) < NOTICES_EVERY_MS: return cache
     import urllib.request
     try:
@@ -696,10 +699,10 @@ def render_pending(pending, paused):
     return {"ids": [n["id"] for n in pending], "for_version": plugin_version(), "systemMessage": " ".join(lines),
             "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "\n".join(ctx)}}
 
-def refresh_notices(cfg, force=False):
+def refresh_notices(cfg, force=False, offline=False):
     """After an upload run: record what was shown, fetch, and leave what should be said next for the SessionStart hook."""
     mark_shown()
-    cache = fetch_notices(cfg, force=force)
+    cache = fetch_notices(cfg, force=force, offline=offline)
     out = render_pending(pending_notices(cfg, cache), uploads_paused(cfg, cache))
     if out:
         NOTICE_PENDING.parent.mkdir(parents=True, exist_ok=True); json.dump(out, open(NOTICE_PENDING, "w", encoding="utf-8"), indent=1)
@@ -709,6 +712,9 @@ def refresh_notices(cfg, force=False):
 
 def notices_cmd(args):
     cfg = load_config() or {}
+    if getattr(args, "rebuild", False):   # the SessionStart hook, after an update: this version's notice, from what was last fetched
+        if cfg: refresh_notices(cfg, offline=True)
+        return 0
     cache = fetch_notices(cfg, force=args.fetch) or {}
     print(json.dumps({"ok": True, "fetched_at": cache.get("fetched_at"), "latest_version": cache.get("latest_version"), "installed": NAME + " " + plugin_version(),
                       "pending": pending_notices(cfg, cache), "uploads_paused": bool(uploads_paused(cfg, cache)), "seen": cache.get("seen") or []}, ensure_ascii=False, indent=1))
@@ -817,7 +823,7 @@ def main():
     m = sub.add_parser("map"); m.add_argument("transcript"); m.add_argument("--conv", default=None); m.add_argument("--dump", default=None)
     k = sub.add_parser("key", help="the content master key"); k.add_argument("key_cmd", choices=["id", "rotate"])
     c = sub.add_parser("claim", help="give this anonymous owner an e-mail"); c.add_argument("email")
-    n = sub.add_parser("notices", help="what the plugin's makers want you to know"); n.add_argument("--fetch", action="store_true", help="fetch now instead of using the hourly cache")
+    n = sub.add_parser("notices", help="what the plugin's makers want you to know"); n.add_argument("--fetch", action="store_true", help="fetch now instead of using the hourly cache"); n.add_argument("--rebuild", action="store_true", help="write the next session's notice again from what was last fetched, without the network")
     acc = sub.add_parser("accept-notice", help="accept the current privacy notice after reading PRIVACY.md"); acc.add_argument("version")
     ad = sub.add_parser("admin", help="operator commands, with the ledger's administrator token"); adsub = ad.add_subparsers(dest="admin_cmd")
     for name in ("new", "list", "revoke"):
