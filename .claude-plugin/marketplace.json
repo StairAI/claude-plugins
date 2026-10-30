@@ -1,0 +1,14 @@
+{
+  "name": "stair-ai-dev",
+  "owner": {
+    "name": "Stair AI"
+  },
+  "description": "Stair AI plugins, staging channel: the next version of stair, writing to the staging ledger. For the Stair team; everyone else installs from main.",
+  "plugins": [
+    {
+      "name": "stair-dev",
+      "source": "./plugins/stair-dev",
+      "description": "Staging channel of stair: records your Claude Code sessions to the staging Reasoning Ledger, encrypted on your machine, to try a version before it is released."
+    }
+  ]
+}
