@@ -96,11 +96,31 @@ def encryption_for(cfg):
     from reasoning_ledger import ContentEncryption, load_master_key
     return ContentEncryption(master_key=load_master_key(p), agent_id=cfg.get("agent_id"))
 
+LEGACY_SDK_SRC = str(Path.home() / "work/rl-dev/Reasoning-Ledger/python-sdk/src")   # what setup stored by default before 0.11.1
+
+def use_sdk_src(cfg):
+    """Import the SDK from a development checkout only when one was asked for: STAIR_SDK_SRC, or --sdk-src at setup.
+    Otherwise the plugin's own environment runs, with the SDK its channel pins, as on every user's machine."""
+    p = os.environ.get("STAIR_SDK_SRC") or os.environ.get("RL_SDK_SRC")
+    if not p:
+        p = (cfg or {}).get("sdk_src")
+        if p == LEGACY_SDK_SRC: p = None   # the old default, not a choice anyone made
+    if p and os.path.isdir(p) and p not in sys.path: sys.path.insert(0, p)
+
+def repair_event_line(line):
+    """A queue line written on macOS before 0.11.1 carries "ts":<seconds>3N (its date has no %N), which is not JSON:
+    keep the event, with the time in milliseconds."""
+    import re
+    m = re.match(r'\{"event":"([A-Za-z]+)","ts":(\d{10})[^,]*,"payload":', line)
+    if not m: return None
+    try: return json.loads('{"event":"%s","ts":%s000,"payload":%s' % (m.group(1), m.group(2), line[m.end():]))
+    except Exception: return None
+
 _client = None
 def client(cfg):
     global _client
     if _client is None:
-        sys.path.insert(0, cfg["sdk_src"])
+        use_sdk_src(cfg)
         from reasoning_ledger import LedgerClient, LedgerClientConfig
         _client = LedgerClient(LedgerClientConfig(api_key=api_key(cfg), agent_id=cfg["agent_id"], endpoint=cfg["endpoint"], encryption=encryption_for(cfg)))
     return _client
@@ -199,7 +219,9 @@ def process(args):
     by_transcript = {}; acts = {}
     for l in lines:
         try: ev = json.loads(l)
-        except Exception: continue
+        except Exception:
+            ev = repair_event_line(l)
+            if ev is None: continue
         p = ev.get("payload") or {}; tp = p.get("transcript_path"); e = ev.get("event")
         if not tp: continue
         st = by_transcript.setdefault(tp, load_state(tp))
@@ -291,13 +313,14 @@ def setup(args):
         save_key(key_path, register_owner(args.endpoint, email, token, invite)); args.api_key_file = str(key_path)
     else:
         args.api_key_file = str(key_path)          # set up again on a machine that already has its owner key
-    cfg = {"endpoint": args.endpoint.rstrip("/"), "api_key_file": args.api_key_file, "agent_name": args.agent_name, "sdk_src": args.sdk_src, "device": device_info(),
+    cfg = {"endpoint": args.endpoint.rstrip("/"), "api_key_file": args.api_key_file, "agent_name": args.agent_name, "device": device_info(),
            "privacy_notice": {"version": PRIVACY_NOTICE_VERSION, "accepted_at": now_ms()}}
+    if getattr(args, "sdk_src", None): cfg["sdk_src"] = args.sdk_src   # a development checkout of the SDK, only when asked for
     if email: cfg["owner_email"] = email
     elif previous.get("owner_email"): cfg["owner_email"] = previous["owner_email"]
     if invite: cfg["invite_code"] = invite.strip()   # kept, so a later setup on this machine does not ask for it again
     if getattr(args, "viewer_url", None): cfg["viewer_url"] = args.viewer_url.rstrip("/")
-    sys.path.insert(0, cfg["sdk_src"])
+    use_sdk_src(cfg)
     from reasoning_ledger import LedgerClient, RegisterAgentOpts, ResolveAgentOpts
     key = api_key(cfg)
     try: aid = LedgerClient.resolve_agent_id(ResolveAgentOpts(api_key=key, endpoint=cfg["endpoint"], name=cfg["agent_name"]))
@@ -333,10 +356,21 @@ def status(args):
             enc = {"enabled": True, "master_key_id": master_key_id(load_master_key(master_key_path(cfg))), "master_key_file": str(master_key_path(cfg))}
         except Exception as e:
             enc = {"enabled": True, "error": "master key unreadable: %s" % str(e)[:120], "master_key_file": str(master_key_path(cfg))}
+    venv = os.environ.get("STAIR_VENV") or ""
+    environment = {"python": sys.executable, "own": bool(venv) and sys.executable.startswith(venv), "sdk": os.environ.get("STAIR_SDK_SPEC_WANTED")}
+    try:
+        from importlib.metadata import version as dist_version
+        environment["sdk_version"] = dist_version("reasoning-ledger")
+    except Exception: pass
+    cmd = Path.home() / ".local" / "bin" / NAME
+    command = {"path": str(cmd), "kind": "absent"}
+    if cmd.is_symlink(): command["kind"] = "link to %s" % os.readlink(cmd)
+    elif cmd.exists(): command["kind"] = "follows the installed version" if "stair-command" in cmd.read_text(errors="replace")[:300] else "other"
     print(json.dumps({"ok": bool(cfg) and "error" not in enc, "configured": bool(cfg), "endpoint": cfg and cfg.get("endpoint"), "agent_id": cfg and cfg.get("agent_id"),
                       "transcripts": len(states), "records_uploaded": up, "queued_events": q, "spooled": sp, "home": str(HOME), "encryption": enc,
                       "privacy_notice": (cfg or {}).get("privacy_notice"), "owner": (cfg or {}).get("owner_email") or ("anonymous" if cfg else None),
-                      "plugin": NAME + " " + plugin_version(), "channel": CHANNEL["STAIR_CHANNEL"], "notice_pending": NOTICE_PENDING.exists()}))
+                      "plugin": NAME + " " + plugin_version(), "channel": CHANNEL["STAIR_CHANNEL"], "notice_pending": NOTICE_PENDING.exists(),
+                      "environment": environment, "command": command}))
     return 0
 
 def flush(args):
@@ -418,13 +452,13 @@ def fetch_notices(cfg, force=False):
     cache = {}
     try: cache = json.load(open(NOTICES_FILE, encoding="utf-8"))
     except Exception: pass
-    if not force and now_ms() - (cache.get("fetched_at") or 0) < NOTICES_EVERY_MS: return cache
+    if not force and cache.get("url") == url and now_ms() - (cache.get("fetched_at") or 0) < NOTICES_EVERY_MS: return cache
     import urllib.request
     try:
         req = urllib.request.Request(url, headers={"user-agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=5) as res: fetched = json.loads(res.read().decode("utf-8"))
         cache = {"fetched_at": now_ms(), "url": url, "notices": fetched.get("notices") or [], "latest_version": fetched.get("latest_version") or {},
-                 "seen": cache.get("seen") or []}
+                 "changes": fetched.get("changes") or [], "seen": cache.get("seen") or []}
         NOTICES_FILE.parent.mkdir(parents=True, exist_ok=True); json.dump(cache, open(NOTICES_FILE, "w", encoding="utf-8"), indent=1)
     except Exception as e:
         log("notices", e)
@@ -448,11 +482,16 @@ def pending_notices(cfg, cache):
     latest = (cache.get("latest_version") or {}).get(NAME)
     installed = plugin_version()
     if latest and version_tuple(latest) > version_tuple(installed):
-        out.append({"id": "update:%s" % latest, "kind": "update", "title": "%s %s is available (you have %s)" % (NAME, latest, installed)})
+        # What changes between the installed version and the new one, newest first (publish.sh puts CHANGES.md there).
+        changes = [c for c in cache.get("changes") or [] if isinstance(c, dict)
+                   and version_tuple(installed) < version_tuple(c.get("version")) <= version_tuple(latest)]
+        changes.sort(key=lambda c: version_tuple(c.get("version")), reverse=True)
+        out.append({"id": "update:%s" % latest, "kind": "update", "title": "%s %s is available (you have %s)" % (NAME, latest, installed), "changes": changes})
     accepted = ((cfg or {}).get("privacy_notice") or {}).get("version") or ""
     for n in cache.get("notices") or []:
         nid = n.get("id")
         if not nid or nid in seen: continue
+        if n.get("kind") == "changes": continue   # "what's new" as a plain message, for versions before 0.11.1 only
         if n.get("until") and str(n["until"]) < time.strftime("%Y-%m-%d"): continue
         if n.get("channel") and n["channel"] != CHANNEL["STAIR_CHANNEL"]: continue
         if n.get("kind") == "privacy" and n.get("privacy_notice_version") and str(n["privacy_notice_version"]) <= accepted: continue
@@ -473,13 +512,22 @@ def render_pending(pending, paused):
     for n in pending:
         kind = n.get("kind"); title = n.get("title") or n.get("id"); text = n.get("text") or ""
         if kind == "update":
-            lines.append("Stair: " + title + ". Say \"update stair\" to update.")
+            changes = n.get("changes") or []
+            summary = (changes[0].get("summary") or "").strip().rstrip(".") if changes else ""
+            lines.append("Stair: " + title + (": " + summary if summary else "") + ". Say \"update stair\" to update" + (", or ask what changed." if changes else "."))
             mkt = "stair-ai-dev" if NAME == "stair-dev" else "stair-ai"
             # `claude plugin update` alone compares against the local copy of the marketplace, which is only refreshed by
             # `claude plugin marketplace update`; without it the update reports the installed version as the latest.
             ctx.append("Update available: %s. If they want it, run `claude plugin marketplace update %s && claude plugin update %s@%s` "
                        "(both, in this order: the first fetches the marketplace), then tell them the new version applies to sessions "
-                       "started after the update." % (title, mkt, NAME, mkt))
+                       "started after the update; the `%s` command and the plugin's Python environment follow by themselves." % (title, mkt, NAME, mkt, NAME))
+            if changes:
+                ctx.append("What the update changes, newest first. If they ask what is new, tell them from this list, in their language, "
+                           "and say first anything marked \"You do\":")
+                for c in changes:
+                    ctx.append("- %s: %s" % (c.get("version"), c.get("summary") or ""))
+                    ctx.extend("  - You do: " + y for y in c.get("you_do") or [])
+                    ctx.extend("  - " + i for i in c.get("items") or [])
         elif kind == "privacy":
             lines.append("Stair: the privacy notice changed (%s); recording is paused until you accept it." % n.get("privacy_notice_version"))
             ctx.append("Privacy notice changed to version %s: %s Uploads are paused until accepted. Update the plugin if the installed PRIVACY.md is older, read PRIVACY.md to the person in their language, ask for consent, and only with a clear yes run `%s rl accept-notice %s`." % (n.get("privacy_notice_version"), text, NAME, n.get("privacy_notice_version")))
@@ -526,7 +574,7 @@ def key_cmd(args):
     stays as master.key.old until you delete it). `key id` prints the current key's id."""
     cfg = load_config()
     if not cfg or not master_key_path(cfg): print(json.dumps({"ok": False, "error": "no content master key: run `stair rl setup` first"})); return 1
-    sys.path.insert(0, cfg["sdk_src"])
+    use_sdk_src(cfg)
     from reasoning_ledger import ContentEncryption, generate_master_key, load_master_key, master_key_id, save_master_key
     path = master_key_path(cfg); old = load_master_key(path)
     if args.key_cmd == "id": print(json.dumps({"ok": True, "master_key_id": master_key_id(old), "master_key_file": str(path)})); return 0
@@ -601,7 +649,7 @@ def main():
     s.add_argument("--invite", default=None, metavar="CODE", help="with --register on a ledger that registers by invitation: your invite code (or set STAIR_INVITE_CODE); kept in config.json")
     s.add_argument("--plaintext", action="store_true", help="upload content in the clear instead of encrypting it on this machine (not for the hosted ledger)")
     s.add_argument("--accept-privacy-notice", default=None, metavar="VERSION", help="the version of PRIVACY.md the person has read and accepts (currently %s); without it setup prints the notice and stops" % PRIVACY_NOTICE_VERSION)
-    s.add_argument("--sdk-src", default=os.environ.get("STAIR_SDK_SRC") or os.environ.get("RL_SDK_SRC") or str(Path.home() / "work/rl-dev/Reasoning-Ledger/python-sdk/src"))
+    s.add_argument("--sdk-src", default=os.environ.get("STAIR_SDK_SRC") or os.environ.get("RL_SDK_SRC"), help="a development checkout of the SDK (its src directory) to use instead of the plugin's own environment")
     s.add_argument("--viewer-url", default=None, help="the viewer's public address when it differs from the endpoint (e.g. an HTTPS proxy)")
     sub.add_parser("status"); sub.add_parser("flush")
     v = sub.add_parser("viewer"); v.add_argument("--next", default=None, help="path to open after signing in"); v.add_argument("--base", default=None, help="viewer address to put in front of the ticket")

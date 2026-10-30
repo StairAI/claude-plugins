@@ -4,11 +4,13 @@
 #   stair access …       identity and keys: not yet; for now the owner key and the content master key live under $STAIR_HOME
 #   stair hook <Event>   fast path, bash only: append the hook's JSON to the local queue; on Stop/SessionEnd start the
 #                        detached processor (which maps the transcript and uploads). Never blocks Claude Code for long.
-#   stair env            build (or rebuild) the plugin's own Python environment with the ledger SDK in it.
+#   stair env            build the plugin's own Python environment with the ledger SDK in it (one per SDK version).
+#   stair link [dir]     put the command on PATH (~/.local/bin/<name>): a small script that always runs the version
+#                        Claude Code has installed, so an update needs nothing more.
 #
-# Python resolution, in order: $STAIR_PYTHON; the plugin's own environment ($STAIR_HOME/venv, built by `stair env`
-# or on first `stair rl setup`); a development checkout of the ledger repository next to its SDK ($STAIR_SDK_SRC);
-# the machine's python3 (bootstrap only).
+# Python resolution, in order: $STAIR_PYTHON; the plugin's own environment for the channel's SDK ($STAIR_HOME/venv-<id>,
+# built by `stair env`, by setup, or in the background when a new plugin version pins another SDK); a development
+# checkout of the ledger repository, only when $STAIR_SDK_SRC names its SDK.
 set -u
 # The plugin's directory: where this launcher really is, through any symlink (the README links it into PATH).
 self="${BASH_SOURCE[0]}"
@@ -26,45 +28,107 @@ NAME="${NAME:-stair}"
 HOME_DIR="${STAIR_HOME:-$HOME/.$NAME}"
 # An install made by the plugin's earlier name keeps its state: move it over once (release channel only).
 if [ "$NAME" = stair ] && [ ! -e "$HOME_DIR" ] && [ -z "${STAIR_HOME:-}" ] && [ -d "$HOME/.stair-rl" ]; then mv "$HOME/.stair-rl" "$HOME_DIR" 2>/dev/null || true; fi
-VENV="$HOME_DIR/venv"
-DEV_SDK="${STAIR_SDK_SRC:-$HOME/work/rl-dev/Reasoning-Ledger/python-sdk/src}"
 # Where the SDK comes from when the plugin builds its own environment: a pip requirement (a release, a git ref,
-# or a local path to the python-sdk directory). The channel sets the default: the dev channel follows the ledger
-# repository's develop branch, the release channel is pinned to a release tag.
+# or a local path to the python-sdk directory). The channel sets the default: each published channel pins one (the
+# release channel a release tag, the staging channel a commit of develop); the source repository follows develop.
 SDK_SPEC="${STAIR_SDK_SPEC:-${STAIR_SDK_SPEC_DEFAULT:-reasoning-ledger @ git+https://github.com/StairAI/Reasoning-Ledger.git@develop#subdirectory=python-sdk}}"
-export STAIR_HOME="$HOME_DIR" STAIR_PLUGIN_NAME="$NAME"
+# One environment per SDK requirement: a plugin version that pins another SDK gets a fresh environment, built once,
+# and the others are removed then. `.ready` is written last, so a half-built environment is never used.
+VENV="$HOME_DIR/venv-$(printf '%s' "$SDK_SPEC" | cksum | cut -d ' ' -f 1)"
+export STAIR_HOME="$HOME_DIR" STAIR_PLUGIN_NAME="$NAME" STAIR_VENV="$VENV" STAIR_SDK_SPEC_WANTED="$SDK_SPEC"
 PY=""
 if [ -n "${STAIR_PYTHON:-}" ] && [ -x "${STAIR_PYTHON}" ]; then PY="$STAIR_PYTHON"
-elif [ -x "$VENV/bin/python" ]; then PY="$VENV/bin/python"
-elif [ -d "$DEV_SDK" ] && [ -x "$(dirname "$DEV_SDK")/.venv/bin/python" ]; then
-  PY="$(dirname "$DEV_SDK")/.venv/bin/python"; export STAIR_SDK_SRC="$DEV_SDK" PYTHONPATH="$DEV_SDK${PYTHONPATH:+:$PYTHONPATH}"
+elif [ -f "$VENV/.ready" ] && [ -x "$VENV/bin/python" ]; then PY="$VENV/bin/python"
+elif [ -n "${STAIR_SDK_SRC:-}" ] && [ -d "$STAIR_SDK_SRC" ] && [ -x "$(dirname "$STAIR_SDK_SRC")/.venv/bin/python" ]; then
+  PY="$(dirname "$STAIR_SDK_SRC")/.venv/bin/python"; export PYTHONPATH="$STAIR_SDK_SRC${PYTHONPATH:+:$PYTHONPATH}"
 fi
-build_env() {   # the plugin's own environment: uv when present, python3 -m venv otherwise; needs Python 3.12+
+build_env() {   # the environment for $SDK_SPEC at $VENV: uv when present, python3 -m venv otherwise (needs Python 3.12+)
   mkdir -p "$HOME_DIR" || return 1
+  local lock="$HOME_DIR/venv.lock" waited=0 rc=0 old base
+  until mkdir "$lock" 2>/dev/null; do                    # one build at a time: wait for another, then use what it built
+    if [ -f "$VENV/.ready" ] && "$VENV/bin/python" -c 'import reasoning_ledger' >/dev/null 2>&1; then return 0; fi
+    if [ -n "$(find "$lock" -maxdepth 0 -mmin +15 2>/dev/null)" ]; then rm -rf "$lock"; continue; fi   # a build that died
+    [ "$waited" -ge 300 ] && { echo "stair: another process is still building the environment; try again later" >&2; return 1; }
+    sleep 2; waited=$((waited + 2))
+  done
+  if [ -f "$VENV/.ready" ] && "$VENV/bin/python" -c 'import reasoning_ledger' >/dev/null 2>&1; then rmdir "$lock" 2>/dev/null; return 0; fi
+  echo "stair: building the plugin's Python environment for $SDK_SPEC (about a minute, once per SDK version)" >&2
+  rm -rf "$VENV"
   if command -v uv >/dev/null 2>&1; then
     uv venv --quiet --python 3.12 "$VENV" && uv pip install --quiet --python "$VENV/bin/python" "$SDK_SPEC"
   else
-    local base; base="$(command -v python3.12 || command -v python3 || true)"
-    [ -n "$base" ] || { echo "stair: no python3 found; install Python 3.12+ or uv" >&2; return 1; }
-    "$base" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' || { echo "stair: Python 3.12+ is required (found $("$base" --version 2>&1)); install it or uv" >&2; return 1; }
-    "$base" -m venv "$VENV" && "$VENV/bin/python" -m pip install --quiet --upgrade pip && "$VENV/bin/python" -m pip install --quiet "$SDK_SPEC"
-  fi && "$VENV/bin/python" -c 'import reasoning_ledger' && echo "stair: environment ready at $VENV" >&2
+    base="$(command -v python3.12 || command -v python3 || true)"
+    if [ -z "$base" ]; then echo "stair: no python3 found; install Python 3.12+ or uv" >&2; false
+    elif ! "$base" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)'; then echo "stair: Python 3.12+ is required (found $("$base" --version 2>&1)); install it or uv" >&2; false
+    else "$base" -m venv "$VENV" && "$VENV/bin/python" -m pip install --quiet --upgrade pip && "$VENV/bin/python" -m pip install --quiet "$SDK_SPEC"; fi
+  fi && "$VENV/bin/python" -c 'import reasoning_ledger' && printf '%s\n' "$SDK_SPEC" > "$VENV/.sdk-spec" && : > "$VENV/.ready"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    for old in "$HOME_DIR/venv" "$HOME_DIR"/venv-*; do if [ "$old" != "$VENV" ] && [ -d "$old" ]; then rm -rf "$old"; fi; done   # other SDK versions
+    echo "stair: environment ready at $VENV" >&2
+  else rm -rf "$VENV"; fi
+  rmdir "$lock" 2>/dev/null
+  return "$rc"
 }
+detach() {   # run "$@" in the background, in a session of its own so that it outlives the hook: setsid on Linux; macOS has
+  mkdir -p "$HOME_DIR/logs" 2>/dev/null   # no setsid, so perl does the same there; plain nohup as the last resort
+  if command -v setsid >/dev/null 2>&1; then ( setsid nohup "$@" >> "$HOME_DIR/logs/process.log" 2>&1 < /dev/null & ) 2>/dev/null
+  elif command -v perl >/dev/null 2>&1; then ( nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or exit 127' "$@" >> "$HOME_DIR/logs/process.log" 2>&1 < /dev/null & ) 2>/dev/null
+  else ( nohup "$@" >> "$HOME_DIR/logs/process.log" 2>&1 < /dev/null & ) 2>/dev/null; fi
+}
+CMD_MARK="# stair-command 1"
+write_command() {   # $1: the file. Not a link into one version's directory but a script that finds the installed version
+  local mkt=stair-ai tmp="$1.tmp.$$"; [ "$NAME" = stair-dev ] && mkt=stair-ai-dev
+  mkdir -p "$(dirname "$1")" || return 1
+  sed -e "s|@NAME@|$NAME|g" -e "s|@MKT@|$mkt|g" > "$tmp" <<'CMD' || return 1
+#!/usr/bin/env bash
+# stair-command 1: runs the Stair plugin @NAME@ in the version Claude Code has installed now, so an update needs nothing
+# more. Written by `@NAME@ link`; delete this file to remove the command.
+N=@NAME@ M=@MKT@
+C="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins"
+R="$(sed -n "s|.*\"installPath\": *\"\([^\"]*/$M/$N/[^\"]*\)\".*|\1|p" "$C/installed_plugins.json" 2>/dev/null | head -n 1)"
+[ -x "$R/bin/stair" ] || R="$(cat "${STAIR_HOME:-$HOME/.$N}/plugin_root" 2>/dev/null)"
+[ -x "$R/bin/stair" ] || R="$(ls -d "$C/cache/$M/$N"/*/ 2>/dev/null | sort -V | tail -n 1)"
+R="${R%/}"
+[ -x "$R/bin/stair" ] || { echo "$N: the plugin is not installed; run: claude plugin install $N@$M" >&2; exit 1; }
+exec "$R/bin/stair" "$@"
+CMD
+  chmod +x "$tmp" && mv -f "$tmp" "$1"
+}
+if [ "${1:-}" = "link" ]; then   # the command on PATH: refuses to replace a file that is not this plugin's
+  dest="${2:-$HOME/.local/bin}/$NAME"
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    case "$(readlink "$dest" 2>/dev/null)" in
+      */plugins/cache/*/"$NAME"/*) ;;
+      *) grep -q "^$CMD_MARK" "$dest" 2>/dev/null || { echo "$NAME: $dest exists and is not this plugin's command; left as it is" >&2; exit 1; } ;;
+    esac
+  fi
+  write_command "$dest" || exit 1
+  echo "$NAME: $dest now runs the version Claude Code has installed"
+  case ":$PATH:" in *":$(dirname "$dest"):"*) ;; *) echo "$NAME: $(dirname "$dest") is not on your PATH yet; add it in your shell profile" >&2 ;; esac
+  exit 0
+fi
 if [ "${1:-}" = "hook" ]; then
   EVENT="${2:-unknown}"
   [ -f "$HOME_DIR/config.json" ] || exit 0          # not set up: do nothing, never break the session
-  if [ "$EVENT" = "SessionStart" ]; then           # say what the makers left for the person (rl_plugin.py refresh_notices), once
-    if [ -f "$HOME_DIR/notice.pending.json" ]; then cat "$HOME_DIR/notice.pending.json"; mv -f "$HOME_DIR/notice.pending.json" "$HOME_DIR/notice.shown.json" 2>/dev/null; fi
+  if [ "$EVENT" = "SessionStart" ]; then
+    printf '%s\n' "$ROOT" > "$HOME_DIR/plugin_root" 2>/dev/null       # the version sessions run now: the command falls back to it
+    if [ -L "$HOME/.local/bin/$NAME" ]; then                          # a command linked into one version's directory (before
+      case "$(readlink "$HOME/.local/bin/$NAME")" in */plugins/cache/*/"$NAME"/*/bin/stair) write_command "$HOME/.local/bin/$NAME" 2>/dev/null ;; esac
+    fi                                                                # 0.11.1) would stay behind: it becomes the script
+    if [ -z "$PY" ] && [ ! -d "$HOME_DIR/venv.lock" ]; then detach "$ROOT/bin/stair" env; fi   # a new SDK: build it before the turn ends
+    if [ -f "$HOME_DIR/notice.pending.json" ]; then cat "$HOME_DIR/notice.pending.json"; mv -f "$HOME_DIR/notice.pending.json" "$HOME_DIR/notice.shown.json" 2>/dev/null; fi   # what the makers left, once
     exit 0
   fi
   mkdir -p "$HOME_DIR/queue" "$HOME_DIR/logs" 2>/dev/null || exit 0   # the processor's log must have a directory, or the spawn below fails silently
   PAYLOAD="$(cat)"                                   # the hook's JSON on stdin
-  TS="$(date +%s%3N)"
+  TS="$(date +%s%3N 2>/dev/null)"; case "$TS" in ''|*[!0-9]*) TS="$(date +%s)000" ;; esac   # macOS date has no %N
   printf '{"event":"%s","ts":%s,"payload":%s}\n' "$EVENT" "$TS" "${PAYLOAD:-{\}}" >> "$HOME_DIR/queue/events.jsonl" 2>/dev/null
   case "$EVENT" in
     Stop|SessionEnd)
-      if [ -n "$PY" ] && [ -f "$ROOT/rl_plugin.py" ]; then
-        ( setsid nohup "$PY" -P "$ROOT/rl_plugin.py" process >> "$HOME_DIR/logs/process.log" 2>&1 < /dev/null & ) 2>/dev/null
+      if [ -f "$ROOT/rl_plugin.py" ]; then
+        if [ -n "$PY" ]; then detach "$PY" -P "$ROOT/rl_plugin.py" process
+        else detach "$ROOT/bin/stair" rl process; fi                  # no environment for this SDK yet: the launcher builds it first
       fi ;;
   esac
   exit 0
@@ -73,8 +137,8 @@ if [ "${1:-}" = "env" ]; then build_env; exit $?; fi
 if [ "${1:-}" = "access" ]; then echo "$NAME access: not yet. The owner key is $HOME_DIR/owner.key and the content master key is $HOME_DIR/master.key; back both up." >&2; exit 2; fi
 if [ "${1:-}" = "rl" ]; then shift; fi
 if [ -z "$PY" ] || ! "$PY" -c 'import reasoning_ledger' >/dev/null 2>&1; then
-  if [ "${1:-}" = "setup" ]; then build_env || exit 1; PY="$VENV/bin/python"
-  else echo "stair: the ledger SDK is not available; run \"$0 env\" (or \"$0 rl setup …\", which builds the environment first)" >&2; exit 1; fi
+  build_env || { echo "stair: the ledger SDK is not available (see above); \"$NAME env\" tries again" >&2; exit 1; }
+  PY="$VENV/bin/python"
 fi
 [ -f "$ROOT/rl_plugin.py" ] || { echo "stair: plugin missing at $ROOT" >&2; exit 1; }
 exec "$PY" -P "$ROOT/rl_plugin.py" "$@"

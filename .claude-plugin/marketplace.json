@@ -1,6 +1,8 @@
 {
   "name": "stair-ai",
-  "owner": { "name": "Stair AI" },
+  "owner": {
+    "name": "Stair AI"
+  },
   "description": "Stair AI plugins: write your agent's behavior into a Reasoning Ledger you own.",
   "plugins": [
     {

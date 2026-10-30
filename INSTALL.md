@@ -27,10 +27,10 @@ The endpoint is `https://api.stair-ai.com` unless the person says otherwise.
 
 ## 3. Finish
 
-Say in two lines what was done: that an anonymous account was created, the machine's agent name, and that nothing is read from the machine except the transcripts Claude Code writes. From then on, at the start of a session, the plugin may leave a one-line notice from its makers (a new version, a changed privacy notice); relay it and ask before acting on it. Offer to link the launcher into their PATH:
+Say in two lines what was done: that an anonymous account was created, the machine's agent name, and that nothing is read from the machine except the transcripts Claude Code writes. From then on, at the start of a session, the plugin may leave a one-line notice from its makers (a new version, a changed privacy notice); relay it and ask before acting on it. Offer to put the `stair` command on their PATH (a small script in `~/.local/bin` that always runs the installed version, so updates need nothing more):
 
 ```
-ln -sf "$HOME/.claude/plugins/cache/stair-ai/stair/$(ls ~/.claude/plugins/cache/stair-ai/stair | sort -V | tail -1)/bin/stair" ~/.local/bin/stair
+"$HOME/.claude/plugins/cache/stair-ai/stair/$(ls ~/.claude/plugins/cache/stair-ai/stair | sort -V | tail -1)/bin/stair" link
 ```
 
 If anything fails, show the person the exact error and stop; do not retry with other values on your own.
