@@ -47,6 +47,10 @@ class AccessError(Exception):
     """Something the person can act on; printed as one line."""
 
 
+class NotJSON(AccessError):
+    """A server answered with something other than JSON, such as a sign-in page."""
+
+
 def http(method, url, headers=None, body=None, form=None, timeout=20):
     """(status, parsed JSON) for any answer, including errors; AccessError when the server cannot be reached."""
     sent = {"accept": "application/json", "user-agent": USER_AGENT}
@@ -61,8 +65,13 @@ def http(method, url, headers=None, body=None, form=None, timeout=20):
     request = urllib.request.Request(url, data=data, method=method, headers=sent)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8")
-            return response.status, (json.loads(raw) if raw else None)
+            raw = response.read().decode("utf-8", "replace")
+            if not raw:
+                return response.status, None
+            try:
+                return response.status, json.loads(raw)
+            except ValueError:
+                raise NotJSON("%s did not answer with JSON (it ended at %s)" % (url, response.geturl()))
     except urllib.error.HTTPError as error:
         raw = error.read().decode("utf-8", "replace")
         try:
@@ -124,7 +133,10 @@ def gate(cfg, cache, refresh=False):
     if (not refresh and isinstance(known, dict) and known.get("ledger") == ledger
             and time.time() - known.get("fetched_at", 0) < GATE_METADATA_TTL):
         return known
-    status, body = http("GET", ledger + "/.well-known/oauth-authorization-server")
+    try:
+        status, body = http("GET", ledger + "/.well-known/oauth-authorization-server")
+    except NotJSON:
+        status, body = 404, None  # a ledger without the gate sends this path to its sign-in page
     if status == 404:
         raise AccessError("the ledger at %s does not run the access gate yet" % ledger)
     if status != 200 or not isinstance(body, dict) or not body.get("token_endpoint") or not body.get("issuer"):

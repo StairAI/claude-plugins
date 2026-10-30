@@ -1,7 +1,7 @@
 {
   "_about": "What the plugin's makers want people to know. The plugin fetches this file at most hourly and says what applies at the start of the next session; the person decides. latest_version and changes (from claude-code/CHANGES.md) are filled by publish.sh for the channel it publishes: stair on main, stair-dev on staging; each channel reads its own branch's copy. A notice: {id, kind: update|privacy|info, title, text, until?: YYYY-MM-DD, channel?: release|dev, privacy_notice_version?: for kind privacy}.",
   "latest_version": {
-    "stair-dev": "0.13.0"
+    "stair-dev": "0.13.1"
   },
   "notices": [
     {
@@ -12,13 +12,21 @@
       "text": "Fingerprints are now keyed, the makers' notices no longer reach Claude, the machine name is said to be readable, the viewer opens a limited, recorded grant instead of carrying your master key, and the notice says where that protection ends. Update the plugin, then let Claude read you the notice."
     },
     {
-      "id": "changes:0.13.0",
+      "id": "changes:0.13.1",
       "kind": "changes",
-      "title": "What's new in stair-dev 0.13.0",
-      "text": "Your account can now reach other Stair services, the first being the team's page sharing at share.stair-ai.com. Details: https://github.com/StairAI/claude-plugins/blob/staging/plugins/stair-dev/CHANGES.md"
+      "title": "What's new in stair-dev 0.13.1",
+      "text": "`stair access` now says plainly when your ledger does not run the Stair gate yet, where before it stopped with an error trace. Details: https://github.com/StairAI/claude-plugins/blob/staging/plugins/stair-dev/CHANGES.md"
     }
   ],
   "changes": [
+    {
+      "version": "0.13.1",
+      "summary": "`stair access` now says plainly when your ledger does not run the Stair gate yet, where before it stopped with an error trace.",
+      "you_do": [],
+      "items": [
+        "An older ledger answers the gate's address with its sign-in page; the plugin now reads that as no gate, and any other answer that is not JSON as a one-line error."
+      ]
+    },
     {
       "version": "0.13.0",
       "summary": "Your account can now reach other Stair services, the first being the team's page sharing at share.stair-ai.com.",

@@ -2,6 +2,12 @@
 
 What each version of the Stair plugin for Claude Code changes for the person using it, newest first. When a newer version is out, the plugin says so at the start of a session together with the entries between your version and the new one, and Claude tells you more when you ask. A line that starts with "You do:" is something you have to do; it is said first.
 
+## 0.13.1
+
+`stair access` now says plainly when your ledger does not run the Stair gate yet, where before it stopped with an error trace.
+
+- An older ledger answers the gate's address with its sign-in page; the plugin now reads that as no gate, and any other answer that is not JSON as a one-line error.
+
 ## 0.13.0
 
 Your account can now reach other Stair services, the first being the team's page sharing at share.stair-ai.com.
