@@ -42,7 +42,8 @@ def channel():
 NAME = plugin_name()
 CHANNEL = channel()
 # Each channel keeps its state under ~/.<name>: ~/.stair for the release channel, ~/.stair-dev for the source.
-HOME = Path(os.environ.get("STAIR_HOME") or os.environ.get("RL_PLUGIN_HOME") or Path.home() / ("." + NAME))
+# Run from anywhere but Claude Code's plugin cache (a source checkout, --plugin-dir), the state is kept apart: ~/.<name>-src.
+HOME = Path(os.environ.get("STAIR_HOME") or os.environ.get("RL_PLUGIN_HOME") or Path.home() / ("." + NAME + ("" if "/plugins/cache/" in str(HERE) else "-src")))
 QUEUE = HOME / "queue" / "events.jsonl"
 BATCH = 25   # records per upload; with the longer read timeout below, a slow ledger no longer times a batch out
 # The privacy notice (PRIVACY.md beside this file) a person accepts at setup. Bumped whenever the notice changes in
@@ -230,11 +231,54 @@ def process_transcript(cfg, transcript, payload, st, dry=False):
     if dry: return records, new, info
     ok, failed = upload(cfg, new) if new else ([], [])
     st["uploaded"] = sorted(done | set(ok)); st["last_processed"] = now_ms(); st["info"] = info; save_state(st)
-    if failed:
-        HOME.mkdir(parents=True, exist_ok=True)
-        with open(HOME / "spool.jsonl", "a", encoding="utf-8") as f:
-            for x in failed: f.write(json.dumps(x, ensure_ascii=False, default=str) + "\n")
+    spool(failed)
     return records, new, {**info, "uploaded": len(ok), "failed": len(failed)}
+
+def lasting(err):
+    """Whether retrying cannot help: the record breaks the ledger's rules, by the SDK's check or by the server's (all but a
+    missing upstream, which may still arrive)."""
+    e = str(err)
+    return e.startswith("ValidationError(") or (e.startswith("validation_failed:") and "upstream_record_id" not in e)
+
+def spool(failed):
+    """Keep what failed: to retry (spool.jsonl, `flush`), or aside when retrying cannot help (spool.invalid.jsonl)."""
+    if not failed: return
+    HOME.mkdir(parents=True, exist_ok=True)
+    for name, keep in (("spool.jsonl", False), ("spool.invalid.jsonl", True)):
+        items = [x for x in failed if lasting(x.get("error")) == keep]
+        if items:
+            with open(HOME / name, "a", encoding="utf-8") as f:
+                for x in items: f.write(json.dumps(x, ensure_ascii=False, default=str) + "\n")
+
+LOCK = HOME / "process.lock"
+
+def hold_lock():
+    """One processor at a time per state directory: the queue, the spool and each transcript's state are read and written
+    whole. Several sessions each start one at the end of a turn; the others leave, and the one at work takes the queue
+    again before it stops. None when another holds it."""
+    import fcntl
+    HOME.mkdir(parents=True, exist_ok=True)
+    f = open(LOCK, "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); return f
+    except OSError:
+        f.close(); return None
+
+def take_queue():
+    """Move the queue aside, then read it: a hook that appends meanwhile starts a fresh queue, so no event is lost. Parts left
+    by a run that stopped halfway are read again (records are idempotent on the ledger)."""
+    QUEUE.parent.mkdir(parents=True, exist_ok=True)
+    parts = sorted(QUEUE.parent.glob("events.*.taken"))
+    if QUEUE.exists():
+        taken = QUEUE.with_name("events.%d.%d.taken" % (now_ms(), os.getpid())); os.replace(QUEUE, taken); parts.append(taken)
+    lines = []
+    for part in parts:
+        try: lines += [l for l in open(part, encoding="utf-8") if l.strip()]
+        except FileNotFoundError: pass
+    return lines, parts
+
+def queue_waiting():
+    return QUEUE.exists() or any(QUEUE.parent.glob("events.*.taken"))
 
 def process(args):
     cfg = load_config()
@@ -242,36 +286,48 @@ def process(args):
     paused = uploads_paused(cfg, fetch_notices(cfg))
     if paused:   # the queue keeps growing; nothing leaves this machine until the new notice is accepted
         log("paused", "privacy notice %s not accepted yet" % paused.get("privacy_notice_version")); refresh_notices(cfg); return 0
-    if not QUEUE.exists(): refresh_notices(cfg); return 0
-    time.sleep(args.delay)   # the transcript is written asynchronously and may lag the Stop hook by a moment
-    lines = [l for l in open(QUEUE, encoding="utf-8") if l.strip()]
-    open(QUEUE, "w").close()
-    by_transcript = {}; acts = {}
-    for l in lines:
-        try: ev = json.loads(l)
-        except Exception:
-            ev = repair_event_line(l)
-            if ev is None: continue
-        p = ev.get("payload") or {}; tp = p.get("transcript_path"); e = ev.get("event")
-        if not tp: continue
-        st = by_transcript.setdefault(tp, load_state(tp))
-        if e in ("PermissionRequest", "PermissionDenied"):
-            st.setdefault("permissions", []).append({"tool_name": p.get("tool_name"), "tool_use_id": p.get("tool_use_id"), "tool_input": p.get("tool_input"), "ts": ev.get("ts"), "denied": e == "PermissionDenied"})
-        elif e == "SubagentStop":
-            st.setdefault("subagents", []).append({"agent_id": p.get("agent_id"), "agent_type": p.get("agent_type"), "agent_transcript_path": p.get("agent_transcript_path"), "ts": ev.get("ts")})
-        if e in ("Stop", "SessionEnd"): acts[tp] = p
-    summary = []
-    for tp, st in by_transcript.items():
-        if tp not in acts:
-            save_state(st); continue
-        try:
-            _, new, info = process_transcript(cfg, tp, acts[tp], st)
-            summary.append({"transcript": tp, "new": len(new), **info})
-        except Exception as e:
-            log("process", e); save_state(st)
-    if summary: print(json.dumps(summary, ensure_ascii=False))
+    while True:
+        lock = hold_lock()
+        if lock is None: return 0          # another processor holds the queue; it takes it again before it lets go
+        try: drain(cfg, args)
+        finally: lock.close()
+        if not queue_waiting(): break      # nothing came in after its last take
     refresh_notices(cfg)
     return 0
+
+def drain(cfg, args):
+    """Take the queue and process it, until it stays empty."""
+    waited = False
+    while queue_waiting():
+        if not waited: time.sleep(args.delay); waited = True   # the transcript is written asynchronously, may lag the Stop hook
+        lines, parts = take_queue()
+        by_transcript = {}; acts = {}
+        for l in lines:
+            try: ev = json.loads(l)
+            except Exception:
+                ev = repair_event_line(l)
+                if ev is None: continue
+            p = ev.get("payload") or {}; tp = p.get("transcript_path"); e = ev.get("event")
+            if not tp: continue
+            st = by_transcript.setdefault(tp, load_state(tp))
+            if e in ("PermissionRequest", "PermissionDenied"):
+                st.setdefault("permissions", []).append({"tool_name": p.get("tool_name"), "tool_use_id": p.get("tool_use_id"), "tool_input": p.get("tool_input"), "ts": ev.get("ts"), "denied": e == "PermissionDenied"})
+            elif e == "SubagentStop":
+                st.setdefault("subagents", []).append({"agent_id": p.get("agent_id"), "agent_type": p.get("agent_type"), "agent_transcript_path": p.get("agent_transcript_path"), "ts": ev.get("ts")})
+            if e in ("Stop", "SessionEnd"): acts[tp] = p
+        summary = []
+        for tp, st in by_transcript.items():
+            if tp not in acts:
+                save_state(st); continue
+            try:
+                _, new, info = process_transcript(cfg, tp, acts[tp], st)
+                summary.append({"transcript": tp, "new": len(new), **info})
+            except Exception as e:
+                log("process", e); save_state(st)
+        if summary: print(json.dumps(summary, ensure_ascii=False))
+        for part in parts:
+            try: part.unlink()
+            except FileNotFoundError: pass
 
 
 def register_owner(endpoint, email, token=None, invite=None):
@@ -374,6 +430,8 @@ def setup(args):
 def status(args):
     cfg = load_config(); q = sum(1 for _ in open(QUEUE, encoding="utf-8")) if QUEUE.exists() else 0
     sp = sum(1 for _ in open(HOME / "spool.jsonl", encoding="utf-8")) if (HOME / "spool.jsonl").exists() else 0
+    invalid = sum(1 for _ in open(HOME / "spool.invalid.jsonl", encoding="utf-8")) if (HOME / "spool.invalid.jsonl").exists() else 0
+    q += sum(sum(1 for _ in open(t, encoding="utf-8")) for t in QUEUE.parent.glob("events.*.taken")) if QUEUE.parent.exists() else 0
     states = list((HOME / "state").glob("*.json")) if (HOME / "state").exists() else []
     up = 0
     for s in states:
@@ -397,20 +455,27 @@ def status(args):
     if cmd.is_symlink(): command["kind"] = "link to %s" % os.readlink(cmd)
     elif cmd.exists(): command["kind"] = "follows the installed version" if "stair-command" in cmd.read_text(errors="replace")[:300] else "other"
     print(json.dumps({"ok": bool(cfg) and "error" not in enc, "configured": bool(cfg), "endpoint": cfg and cfg.get("endpoint"), "agent_id": cfg and cfg.get("agent_id"),
-                      "transcripts": len(states), "records_uploaded": up, "queued_events": q, "spooled": sp, "home": str(HOME), "encryption": enc,
+                      "transcripts": len(states), "records_uploaded": up, "queued_events": q, "spooled": sp, "set_aside": invalid, "home": str(HOME), "encryption": enc,
                       "privacy_notice": (cfg or {}).get("privacy_notice"), "owner": (cfg or {}).get("owner_email") or ("anonymous" if cfg else None),
                       "plugin": NAME + " " + plugin_version(), "channel": CHANNEL["STAIR_CHANNEL"], "notice_pending": NOTICE_PENDING.exists(),
                       "environment": environment, "command": command}))
     return 0
 
 def flush(args):
+    """Retry the spool. What the ledger's rules rule out goes aside to spool.invalid.jsonl instead of being retried forever."""
     cfg = load_config(); p = HOME / "spool.jsonl"
     if not cfg or not p.exists(): print(json.dumps({"ok": True, "flushed": 0})); return 0
-    items = [json.loads(l) for l in open(p, encoding="utf-8") if l.strip()]
-    ok, failed = upload(cfg, [x["record"] for x in items])
-    with open(p, "w", encoding="utf-8") as f:
-        for x in failed: f.write(json.dumps(x, ensure_ascii=False, default=str) + "\n")
-    print(json.dumps({"ok": not failed, "flushed": len(ok), "left": len(failed)})); return 0
+    lock = hold_lock()
+    if lock is None: print(json.dumps({"ok": False, "error": "a processor is at work; try again in a moment"})); return 1
+    try:
+        items = [json.loads(l) for l in open(p, encoding="utf-8") if l.strip()]
+        os.replace(p, p.with_name("spool.flushing.jsonl"))
+        ok, failed = upload(cfg, [x["record"] for x in items])
+        spool(failed); p.with_name("spool.flushing.jsonl").unlink()
+    finally:
+        lock.close()
+    aside = [x for x in failed if lasting(x.get("error"))]
+    print(json.dumps({"ok": len(aside) == len(failed), "flushed": len(ok), "left": len(failed) - len(aside), "set_aside": len(aside)})); return 0
 
 def mint_ticket(cfg, next_path=None):
     """Ask the ledger for a one-time viewer sign-in link: POST /v1/viewer/tickets with the owner key (the key never leaves this

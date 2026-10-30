@@ -2,6 +2,14 @@
 
 What each version of the Stair plugin for Claude Code changes for the person using it, newest first. When a newer version is out, the plugin says so at the start of a session together with the entries between your version and the new one, and Claude tells you more when you ask. A line that starts with "You do:" is something you have to do; it is said first.
 
+## 0.12.2
+
+Several sessions open at once no longer lose or repeat each other's records.
+
+- With several Claude Code sessions open, the uploads after each turn no longer run over one another: one at a time takes the queue, moving it aside first, so an event that arrives meanwhile waits for the next round instead of being lost.
+- A record the ledger's rules rule out is set aside (`spool.invalid.jsonl`, counted in `stair rl status`) instead of being retried forever.
+- The plugin run from its source directory keeps its state apart (`~/.stair-dev-src`), so a development copy never shares a queue with the installed plugin.
+
 ## 0.12.1
 
 A message to another session no longer names its recipient, and the privacy notice says where the viewer's protection ends.

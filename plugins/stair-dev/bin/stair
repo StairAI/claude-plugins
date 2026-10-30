@@ -25,7 +25,10 @@ if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then ROOT="$CLAUDE_PLUGIN_ROOT"; else ROOT=
 NAME="$(sed -n 's/^[[:space:]]*"name":[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/.claude-plugin/plugin.json" 2>/dev/null | head -n 1)"
 NAME="${NAME:-stair}"
 [ -f "$ROOT/channel.env" ] && . "$ROOT/channel.env"
-HOME_DIR="${STAIR_HOME:-$HOME/.$NAME}"
+# Run from anywhere but Claude Code's plugin cache (a source checkout, --plugin-dir, a directory marketplace), the plugin
+# keeps its state apart, so a development copy never shares a queue or an account with the installed one.
+case "$ROOT" in */plugins/cache/*) SRC_SUFFIX="" ;; *) SRC_SUFFIX="-src" ;; esac
+HOME_DIR="${STAIR_HOME:-$HOME/.$NAME$SRC_SUFFIX}"
 # An install made by the plugin's earlier name keeps its state: move it over once (release channel only).
 if [ "$NAME" = stair ] && [ ! -e "$HOME_DIR" ] && [ -z "${STAIR_HOME:-}" ] && [ -d "$HOME/.stair-rl" ]; then mv "$HOME/.stair-rl" "$HOME_DIR" 2>/dev/null || true; fi
 # Where the SDK comes from when the plugin builds its own environment: a pip requirement (a release, a git ref,
