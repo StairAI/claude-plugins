@@ -5,7 +5,9 @@ argument-hint: [invite code]
 
 You are helping the person set up Stair, this plugin, which records their Claude Code sessions in a Reasoning Ledger they own. Do the steps in order. Do not skip the review or the consent, and do not run setup until they have said yes.
 
-The plugin's directory is `${CLAUDE_PLUGIN_ROOT}`. If that is not an absolute path, use the newest directory under `~/.claude/plugins/cache/stair-ai/stair/`.
+The plugin's directory is `${CLAUDE_PLUGIN_ROOT}`. If that is not an absolute path, use the newest directory under `~/.claude/plugins/cache/stair-ai/stair/` (for `/stair-dev:install`: `~/.claude/plugins/cache/stair-ai-dev/stair-dev/`).
+
+This plugin's name is the `name` in `.claude-plugin/plugin.json` there: `stair`, the release channel, or `stair-dev`, the staging channel, which writes to the staging ledger and installs side by side with `stair`. The steps below are written for `stair`. For `stair-dev`, the state directory is `~/.stair-dev` instead of `~/.stair` and the command is `stair-dev` instead of `stair`; never point the `stair` command at it.
 
 1. **Review the code first, and report what it does.** Read these files of the plugin (they are small): `bin/stair`, `hooks/hooks.json`, `rl_plugin.py`, `mapper.py`. Tell the person, in plain words: which hooks it registers and what they do on each event; what it reads (the transcript Claude Code writes; nothing else on the machine); where data is sent (only to the endpoint given at setup, and the one-time viewer link request); that content is encrypted on this machine before upload with a key kept in `~/.stair/master.key`; and anything that looks wrong. If anything sends data anywhere else, hides what it does, or looks malicious, stop here and say so.
 
@@ -24,5 +26,8 @@ The plugin's directory is `${CLAUDE_PLUGIN_ROOT}`. If that is not an absolute pa
 5. **Finish.** Tell them: back up `~/.stair/master.key` and `~/.stair/owner.key` now (the keys are the account; without the master key the content cannot be read); recording starts with the next session, or after `/reload-plugins`; `stair rl viewer` prints a one-time link to see their records, decrypted in the browser, and the link must not be shared because it carries their key; `stair rl claim you@example.com` attaches an e-mail whenever they want one. Offer to put the launcher on their PATH:
 
    ```
-   ln -sf "${CLAUDE_PLUGIN_ROOT}/bin/stair" ~/.local/bin/stair
+   ln -sf "${CLAUDE_PLUGIN_ROOT}/bin/stair" ~/.local/bin/stair        # stair, the release channel
+   ln -sf "${CLAUDE_PLUGIN_ROOT}/bin/stair" ~/.local/bin/stair-dev    # stair-dev, the staging channel
    ```
+
+   Run only the line for this plugin's name.
