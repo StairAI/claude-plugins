@@ -1,7 +1,7 @@
 {
   "_about": "What the plugin's makers want people to know. The plugin fetches this file at most hourly and says what applies at the start of the next session; the person decides. latest_version and changes (from claude-code/CHANGES.md) are filled by publish.sh for the channel it publishes: stair on main, stair-dev on staging; each channel reads its own branch's copy. A notice: {id, kind: update|privacy|info, title, text, until?: YYYY-MM-DD, channel?: release|dev, privacy_notice_version?: for kind privacy}.",
   "latest_version": {
-    "stair": "0.12.2"
+    "stair": "0.13.1"
   },
   "notices": [
     {
@@ -12,13 +12,48 @@
       "text": "Fingerprints are now keyed, the makers' notices no longer reach Claude, the machine name is said to be readable, the viewer opens a limited, recorded grant instead of carrying your master key, and the notice says where that protection ends. Update the plugin, then let Claude read you the notice."
     },
     {
-      "id": "changes:0.12.2",
+      "id": "changes:0.13.1",
       "kind": "changes",
-      "title": "What's new in stair 0.12.2",
-      "text": "Several sessions open at once no longer lose or repeat each other's records. Details: https://github.com/StairAI/claude-plugins/blob/main/plugins/stair/CHANGES.md"
+      "title": "What's new in stair 0.13.1",
+      "text": "`stair access` now says plainly when your ledger does not run the Stair gate yet, where before it stopped with an error trace. Details: https://github.com/StairAI/claude-plugins/blob/main/plugins/stair/CHANGES.md"
     }
   ],
   "changes": [
+    {
+      "version": "0.13.1",
+      "summary": "`stair access` now says plainly when your ledger does not run the Stair gate yet, where before it stopped with an error trace.",
+      "you_do": [],
+      "items": [
+        "An older ledger answers the gate's address with its sign-in page; the plugin now reads that as no gate, and any other answer that is not JSON as a one-line error."
+      ]
+    },
+    {
+      "version": "0.13.0",
+      "summary": "Your account can now reach other Stair services, the first being the team's page sharing at share.stair-ai.com.",
+      "you_do": [],
+      "items": [
+        "`stair access token --resource <address>` gives a skill a short-lived token for that one service. Your keys stay on this machine and go only to the Stair gate; the service never sees them.",
+        "`stair access me` shows your handle and the services your account may reach. Who may use which service is set by the Stair operator."
+      ]
+    },
+    {
+      "version": "0.12.4",
+      "summary": "A long upload, such as the first after an update, no longer leaves failed pieces for you to retry by hand.",
+      "you_do": [],
+      "items": [
+        "Records that failed to upload for a passing reason, such as the network, are sent again by the plugin itself, at most every ten minutes.",
+        "Privacy notice versions of the same day compare by number, so a tenth version of a day comes after the second."
+      ]
+    },
+    {
+      "version": "0.12.3",
+      "summary": "The first session after an update says when recording is paused for a privacy notice, even on a machine that never fetched one.",
+      "you_do": [],
+      "items": [
+        "Privacy: when the plugin's own privacy notice is newer than the one you accepted, recording pauses, and every session says so from its first turn until you accept it, without the network.",
+        "`stair rl flush` sends nothing while recording is paused, and when the ledger cannot be reached it keeps everything to retry; `stair rl status` counts it."
+      ]
+    },
     {
       "version": "0.12.2",
       "summary": "Several sessions open at once no longer lose or repeat each other's records.",

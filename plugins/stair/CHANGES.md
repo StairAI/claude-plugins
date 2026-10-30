@@ -2,6 +2,33 @@
 
 What each version of the Stair plugin for Claude Code changes for the person using it, newest first. When a newer version is out, the plugin says so at the start of a session together with the entries between your version and the new one, and Claude tells you more when you ask. A line that starts with "You do:" is something you have to do; it is said first.
 
+## 0.13.1
+
+`stair access` now says plainly when your ledger does not run the Stair gate yet, where before it stopped with an error trace.
+
+- An older ledger answers the gate's address with its sign-in page; the plugin now reads that as no gate, and any other answer that is not JSON as a one-line error.
+
+## 0.13.0
+
+Your account can now reach other Stair services, the first being the team's page sharing at share.stair-ai.com.
+
+- `stair access token --resource <address>` gives a skill a short-lived token for that one service. Your keys stay on this machine and go only to the Stair gate; the service never sees them.
+- `stair access me` shows your handle and the services your account may reach. Who may use which service is set by the Stair operator.
+
+## 0.12.4
+
+A long upload, such as the first after an update, no longer leaves failed pieces for you to retry by hand.
+
+- Records that failed to upload for a passing reason, such as the network, are sent again by the plugin itself, at most every ten minutes.
+- Privacy notice versions of the same day compare by number, so a tenth version of a day comes after the second.
+
+## 0.12.3
+
+The first session after an update says when recording is paused for a privacy notice, even on a machine that never fetched one.
+
+- Privacy: when the plugin's own privacy notice is newer than the one you accepted, recording pauses, and every session says so from its first turn until you accept it, without the network.
+- `stair rl flush` sends nothing while recording is paused, and when the ledger cannot be reached it keeps everything to retry; `stair rl status` counts it.
+
 ## 0.12.2
 
 Several sessions open at once no longer lose or repeat each other's records.

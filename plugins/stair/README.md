@@ -62,6 +62,17 @@ Claude installs the plugin, reads its code and says what it does, explains the p
 | `stair rl admin new --count 5 --note "…" --admin-token-file <file>` | Operators: make invite codes (`list`, `revoke <code>`); the administrator token is read from a file, never passed as an argument |
 | `stair env` | Rebuild the plugin's Python environment |
 
+## Other Stair services: `stair access`
+
+The owner key goes only to the ledger and its access gate. Other Stair services the account can reach, the first being the team's page sharing at `share.stair-ai.com`, receive a short-lived token bound to that one service instead, which `stair access` gets from the gate in exchange for the key (RFC 8693 token exchange). A service is reached only after the Stair administrator has granted it to the account, and pages and files there live under the account's handle, which the administrator gives too.
+
+| Command | What it does |
+|---|---|
+| `stair access token --resource https://share.stair-ai.com` | Print a token for one service, for a program to read (a skill's script); a cached token is reused while it has five minutes left, `--fresh` asks again |
+| `stair access me` | This account's owner id, handle and the services it may reach; send the owner id to the administrator to be given access |
+| `stair access admin handle <owner> <handle>` | Operators: give an owner (id or e-mail) its handle; changing an existing one needs `--replace`, since links under it stop working |
+| `stair access admin grant <owner> <service> <scope>…` | Operators: let an owner reach a service, e.g. `grant colin@stair-ai.com https://share.stair-ai.com share:write`; `grants`, `revoke <id>` and `lookup` too. The administrator token comes from `--admin-token-file` or `STAIR_ADMIN_TOKEN` |
+
 ## Notices from the makers
 
 The plugin checks a public file beside the published plugin (`notices.json` on the channel's own branch of `StairAI/claude-plugins`: `main` for `stair`, `staging` for `stair-dev`; `STAIR_NOTICES_URL` in `channel.env`) at most hourly, after an upload run, never from a hook. What applies to this install and was not shown yet, a newer published version, a privacy notice newer than the accepted one, or a message, is left in `~/.stair/notice.pending.json`; the `SessionStart` hook prints it once, as one line for the person (`systemMessage`, which may quote the file) and, for Claude, sentences built on this machine from version numbers only (`additionalContext`), never the file's text: whoever can change that file could otherwise instruct every installed assistant. When the person asks what an update changes, Claude reads the new version's `CHANGES.md`, and nothing interrupts a session in progress. A changed privacy notice pauses uploads (the queue keeps growing on the machine) until `stair rl accept-notice <version>` is run with the installed `PRIVACY.md`'s version, after the person has read it. `stair rl notices --fetch` shows the state now. Updating is `claude plugin marketplace update stair-ai && claude plugin update stair@stair-ai` (for `stair-dev`: `stair-ai-dev` and `stair-dev@stair-ai-dev`), the marketplace first: `claude plugin update` alone compares against the local copy of the marketplace and finds nothing newer. The new version applies to sessions started after it.
@@ -92,11 +103,11 @@ Rewind and fork of a conversation are represented, not erased: see `../LEDGER_GU
 
 ## Files
 
-- `hooks/hooks.json`, `bin/stair` (bash fast path + python entry), `rl_plugin.py` (processor, setup, status, flush, map, viewer, key, admin), `mapper.py` (transcript to records), `PRIVACY.md` (the notice setup asks you to accept), `commands/install.md` (`/stair:install`).
+- `hooks/hooks.json`, `bin/stair` (bash fast path + python entry), `rl_plugin.py` (processor, setup, status, flush, map, viewer, key, admin), `access.py` (`stair access`: tokens for other Stair services, handles and grants), `mapper.py` (transcript to records), `PRIVACY.md` (the notice setup asks you to accept), `commands/install.md` (`/stair:install`).
 - `../LEDGER_GUIDE.md` (repository root) - the eleven behaviors, their fields, and the rules this plugin maps Claude Code's transcript by.
-- `experiment/` - the headless experiment and install-test runners; `tests/` - mapper rules on synthetic transcripts (turns, rewind, fork, plans, verification reads, questions, schema validity) and the setup, viewer, key and admin commands.
+- `experiment/` - the headless experiment and install-test runners; `tests/` - mapper rules on synthetic transcripts (turns, rewind, fork, plans, verification reads, questions, schema validity) and the setup, viewer, key and admin commands; `stair access` against a stand-in gate.
 
-State: `$STAIR_HOME` (default `~/.stair`; an install made under the plugin's earlier name, `~/.stair-rl`, is moved over on first use): `config.json`, `owner.key`, `master.key`, `queue/events.jsonl`, `state/<transcript>.json` (what was uploaded), `spool.jsonl` (records the server rejected, with its reason, and records held back because their upstream failed; `stair rl flush` retries), `logs/`.
+State: `$STAIR_HOME` (default `~/.stair`; an install made under the plugin's earlier name, `~/.stair-rl`, is moved over on first use): `config.json`, `owner.key`, `master.key`, `access.json` (cached service tokens and the gate's address), `queue/events.jsonl`, `state/<transcript>.json` (what was uploaded), `spool.jsonl` (records the server rejected, with its reason, and records held back because their upstream failed; `stair rl flush` retries), `logs/`.
 
 ## Channels: `stair` and `stair-dev`
 
