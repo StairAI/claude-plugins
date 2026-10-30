@@ -17,10 +17,10 @@ If the marketplace was added before, the first command says so; then run `claude
 
 The plugin is now at the newest directory under `~/.claude/plugins/cache/stair-ai/stair/` (`~/.claude/plugins/cache/stair-ai/stair/<version>/`, the highest version there). Read `commands/install.md` in that directory and follow it exactly. It has you:
 
-1. read the plugin's code (`bin/stair`, `hooks/hooks.json`, `rl_plugin.py`, `mapper.py`) and tell the person what it does, what it reads, and where it sends data;
+1. read the plugin's code (`bin/stair`, `hooks/hooks.json`, `rl_plugin.py`, `mapper.py`), tell the person what it does, what it reads, and where it sends data, and note the version you reviewed;
 2. explain the privacy notice (`PRIVACY.md`) in the person's language, with its full meaning;
-3. ask for their consent to notice version `2026-10-29`, and stop without a clear yes;
-4. ask for a short name for this machine and their invite code (they may have given it in their message); no e-mail is needed, the account is anonymous and its keys are its identity; then run the setup command with `--accept-privacy-notice 2026-10-29`;
+3. ask for their consent to notice version `2026-10-30.2`, and stop without a clear yes;
+4. ask for a short name for this machine (it is readable on the ledger) and their invite code (they may have given it in their message); no e-mail is needed, the account is anonymous and its keys are its identity; check the version again, and if it changed, review what changed first; then run the setup command with `--accept-privacy-notice 2026-10-30.2`;
 5. tell them to back up `~/.stair/master.key` and `~/.stair/owner.key`, that recording starts with the next session (or `/reload-plugins`), that `stair rl viewer` opens their records, and that `stair rl claim you@example.com` attaches an e-mail whenever they want one.
 
 The endpoint is `https://api.stair-ai.com` unless the person says otherwise.

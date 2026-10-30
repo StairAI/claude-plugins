@@ -25,7 +25,10 @@ if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then ROOT="$CLAUDE_PLUGIN_ROOT"; else ROOT=
 NAME="$(sed -n 's/^[[:space:]]*"name":[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/.claude-plugin/plugin.json" 2>/dev/null | head -n 1)"
 NAME="${NAME:-stair}"
 [ -f "$ROOT/channel.env" ] && . "$ROOT/channel.env"
-HOME_DIR="${STAIR_HOME:-$HOME/.$NAME}"
+# Run from anywhere but Claude Code's plugin cache (a source checkout, --plugin-dir, a directory marketplace), the plugin
+# keeps its state apart, so a development copy never shares a queue or an account with the installed one.
+case "$ROOT" in */plugins/cache/*) SRC_SUFFIX="" ;; *) SRC_SUFFIX="-src" ;; esac
+HOME_DIR="${STAIR_HOME:-$HOME/.$NAME$SRC_SUFFIX}"
 # An install made by the plugin's earlier name keeps its state: move it over once (release channel only).
 if [ "$NAME" = stair ] && [ ! -e "$HOME_DIR" ] && [ -z "${STAIR_HOME:-}" ] && [ -d "$HOME/.stair-rl" ]; then mv "$HOME/.stair-rl" "$HOME_DIR" 2>/dev/null || true; fi
 # Where the SDK comes from when the plugin builds its own environment: a pip requirement (a release, a git ref,
@@ -117,6 +120,11 @@ if [ "${1:-}" = "hook" ]; then
       case "$(readlink "$HOME/.local/bin/$NAME")" in */plugins/cache/*/"$NAME"/*/bin/stair) write_command "$HOME/.local/bin/$NAME" 2>/dev/null ;; esac
     fi                                                                # 0.11.1) would stay behind: it becomes the script
     if [ -z "$PY" ] && [ ! -d "$HOME_DIR/venv.lock" ]; then detach "$ROOT/bin/stair" env; fi   # a new SDK: build it before the turn ends
+    if [ -f "$HOME_DIR/notice.pending.json" ] && ! grep -q "\"for_version\": \"$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/.claude-plugin/plugin.json" | head -n 1)\"" "$HOME_DIR/notice.pending.json" 2>/dev/null; then
+      rm -f "$HOME_DIR/notice.pending.json"                           # another version wrote it: write it again for this one,
+      rp="$PY"; [ -n "$rp" ] || rp="$(command -v python3.12 || command -v python3.11 || true)"   # from what was last fetched
+      [ -n "$rp" ] && "$rp" -P "$ROOT/rl_plugin.py" notices --rebuild >/dev/null 2>&1          # (no network)
+    fi
     if [ -f "$HOME_DIR/notice.pending.json" ]; then cat "$HOME_DIR/notice.pending.json"; mv -f "$HOME_DIR/notice.pending.json" "$HOME_DIR/notice.shown.json" 2>/dev/null; fi   # what the makers left, once
     exit 0
   fi

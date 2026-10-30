@@ -2,6 +2,47 @@
 
 What each version of the Stair plugin for Claude Code changes for the person using it, newest first. When a newer version is out, the plugin says so at the start of a session together with the entries between your version and the new one, and Claude tells you more when you ask. A line that starts with "You do:" is something you have to do; it is said first.
 
+## 0.12.2
+
+Several sessions open at once no longer lose or repeat each other's records.
+
+- With several Claude Code sessions open, the uploads after each turn no longer run over one another: one at a time takes the queue, moving it aside first, so an event that arrives meanwhile waits for the next round instead of being lost.
+- A record the ledger's rules rule out is set aside (`spool.invalid.jsonl`, counted in `stair rl status`) instead of being retried forever.
+- The plugin run from its source directory keeps its state apart (`~/.stair-dev-src`), so a development copy never shares a queue with the installed plugin.
+
+## 0.12.1
+
+A message to another session no longer names its recipient, and the privacy notice says where the viewer's protection ends.
+
+- Privacy: a message sent to another session or agent no longer writes the recipient's name, often a session's title, where the ledger can read it; only a keyed fingerprint of it.
+- Privacy: the privacy notice is now version 2026-10-30.2. It adds that an assistant able to act in your browser can see what you open there. Recording pauses until you accept it.
+- You do: after updating, accept the privacy notice; Claude reads it to you and asks.
+- Privacy: records uploaded before 0.11.2 keep their plain fingerprints, since the ledger never rewrites a record. Fingerprints follow the master key, so after `stair rl key rotate` new records no longer match older ones.
+- After an update, the first session shows what the previous version left to say, such as a changed privacy notice, instead of skipping it.
+- On Linux the viewer opens a browser only when you run it yourself; run by an assistant, it says to run it in your own terminal.
+- `stair rl status` calls the SDK's own version number `sdk_package_version`, beside the pin that chose it (`sdk`).
+
+## 0.12.0
+
+The viewer works by grants: each view is a limited, recorded authorization, and your master key stays on your machine.
+
+- Privacy: `stair rl viewer` no longer puts your master key in the link. It grants a view of your sessions of the last seven days for an hour (`--days`, `--hours`): their keys are wrapped again here under a fresh key that only the link carries, and the grant is recorded in your ledger. When it ends, the ledger drops those keys and the link opens nothing.
+- Privacy: Claude is never shown the link's key. The plugin opens the link in your browser, or prints it only in a terminal of your own; when Claude Code runs on another machine, run `stair rl viewer` in a terminal there.
+- Privacy: the privacy notice is now version 2026-10-30.1, describing the viewer as it now works. Recording pauses until you accept it.
+- You do: after updating, accept the privacy notice; Claude reads it to you and asks.
+- `stair rl grants` lists your grants; `stair rl revoke <grant>` ends one now.
+
+## 0.11.2
+
+Notices no longer speak to Claude, fingerprints can no longer be guessed, and the privacy notice says how things work today.
+
+- Privacy: the fingerprints that let records be matched without carrying text (the prompt that opened a turn, a task handed to another session, a file write, a thinking block) are computed with a key derived from yours, so nobody can test guesses against them.
+- Privacy: the words of the makers' notices are shown to you only. Claude is told only that there is a new version or a changed notice, and reads a new version's notes when you ask what it changes.
+- Privacy: the privacy notice is now version 2026-10-30. It describes the two changes above, says that the name you give this machine is readable on the ledger, and says plainly how the viewer works today. Recording pauses until you accept it.
+- You do: after updating, accept the new privacy notice; Claude reads it to you and asks.
+- A notice left by the version you updated from is no longer shown after the update.
+- Uploads wait longer for a slow ledger and go in smaller batches, so they no longer time out.
+
 ## 0.11.1
 
 Updating is one step now: the plugin, the `stair` command and the plugin's Python environment move to the new version together.

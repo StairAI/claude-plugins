@@ -39,7 +39,7 @@ upstream_record_id: the server checks that an upstream record exists under the s
 order. Nothing here touches the network.
 """
 from __future__ import annotations
-import hashlib, json, os, re, uuid, hashlib, datetime
+import hashlib, hmac, json, os, re, uuid, datetime
 from pathlib import Path
 
 NS = uuid.NAMESPACE_URL
@@ -73,14 +73,27 @@ def norm_text(s):
     """Text as both ends of a hand-over see it: the app writes @ as a full-width ＠ when it passes text between sessions."""
     return (s or "").replace("\uff20", "@").replace("\r\n", "\n").strip()
 
+_FP_KEY = None
+
+def set_fingerprint_key(key):
+    """Content fingerprints (the prompt that opened a turn, a brief or message handed to another session, a file write, a
+    thinking block, a verdict sentence, what a question was given) are HMAC-SHA256 with this key once it is set. The plugin
+    derives it from the content master key, so the same text still matches across this owner's sessions while the ledger
+    cannot test guesses against it, not even for a one-word prompt. Unset (tests, a plaintext ledger) they are SHA-256."""
+    global _FP_KEY
+    _FP_KEY = key
+
+def fingerprint(raw):
+    return hmac.new(_FP_KEY, raw, hashlib.sha256).hexdigest() if _FP_KEY else hashlib.sha256(raw).hexdigest()
+
 def link_key(s):
-    """The tag that pairs a Delegating with the turn it started in the other session: a digest of the brief or message."""
-    return "link:" + hashlib.sha256(norm_text(s).encode("utf-8")).hexdigest()[:16]
+    """The tag that pairs a Delegating with the turn it started in the other session: a fingerprint of the brief or message."""
+    return "link:" + fingerprint(norm_text(s).encode("utf-8"))[:16]
 
 def rid(*parts): return str(uuid.uuid5(NS, "stair-ai.com/stair-rl/" + "/".join(str(p) for p in parts)))
 def sha(obj):
     raw = obj.encode("utf-8") if isinstance(obj, str) else json.dumps(obj, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
+    return fingerprint(raw)
 def ts_ms(s):
     try: return int(datetime.datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp() * 1000)
     except Exception: return None
@@ -124,7 +137,7 @@ def thinking_fingerprint(text):
     output_payload, and every content reference in a record must point at content the ledger holds); the text itself never
     leaves the machine. A block whose text is absent from the transcript is marked as such."""
     data = (text or "").encode("utf-8")
-    return json.dumps({"thinking": "withheld" if data else "absent", "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}, sort_keys=True)
+    return json.dumps({"thinking": "withheld" if data else "absent", "sha256": fingerprint(data), "bytes": len(data)}, sort_keys=True)
 
 
 class Mapper:
@@ -428,9 +441,13 @@ class Mapper:
                                         tags=tags_turn + ([link_key(task)] if isinstance(task, str) and task.strip() else [])); kind = "delegate"
                     elif name == "SendMessage" or name.endswith("__send_message"):
                         msg = inp.get("message") or inp.get("content")
+                        # The recipient is named by what it is, never by its name (often a session's title, which is private):
+                        # a keyed fingerprint lets its owner group messages by recipient while the ledger cannot read it.
+                        to = str(inp.get("to") or inp.get("session_id") or "")
                         rec = self.base(sid, "Delegating", ts, "ai", "post_execution", kind="message", goal=msg or inp,
-                                        delegate_agent_id=str(inp.get("to") or inp.get("session_id") or "session")[:40], awaited=False, record_id=rid(self.agent_id, tid, "tool"),
-                                        tags=tags_turn + ([link_key(msg)] if isinstance(msg, str) and msg.strip() else [])); kind = "delegate"
+                                        delegate_agent_id="claude-code-peer",
+                                        awaited=False, record_id=rid(self.agent_id, tid, "tool"),
+                                        tags=tags_turn + ([link_key(msg)] if isinstance(msg, str) and msg.strip() else []) + (["to:" + fingerprint(norm_text(to).encode("utf-8"))[:16]] if to else [])); kind = "delegate"
                     elif name == "AskUserQuestion":
                         qs = inp.get("questions") or []; opts = [o.get("label") for q in qs for o in (q.get("options") or []) if isinstance(o, dict) and o.get("label")]
                         rec = self.base(sid, "Escalating", ts, "ai", "pre_execution", kind="question", asked=qs, record_id=rid(self.agent_id, tid, "tool"), **common); kind = "ask"

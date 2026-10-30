@@ -1,17 +1,76 @@
 {
   "_about": "What the plugin's makers want people to know. The plugin fetches this file at most hourly and says what applies at the start of the next session; the person decides. latest_version and changes (from claude-code/CHANGES.md) are filled by publish.sh for the channel it publishes: stair on main, stair-dev on staging; each channel reads its own branch's copy. A notice: {id, kind: update|privacy|info, title, text, until?: YYYY-MM-DD, channel?: release|dev, privacy_notice_version?: for kind privacy}.",
   "latest_version": {
-    "stair": "0.11.1"
+    "stair": "0.12.2"
   },
   "notices": [
     {
-      "id": "changes:0.11.1",
+      "id": "privacy-2026-10-30.2",
+      "kind": "privacy",
+      "privacy_notice_version": "2026-10-30.2",
+      "title": "Privacy notice 2026-10-30.2",
+      "text": "Fingerprints are now keyed, the makers' notices no longer reach Claude, the machine name is said to be readable, the viewer opens a limited, recorded grant instead of carrying your master key, and the notice says where that protection ends. Update the plugin, then let Claude read you the notice."
+    },
+    {
+      "id": "changes:0.12.2",
       "kind": "changes",
-      "title": "What's new in stair 0.11.1",
-      "text": "Updating is one step now: the plugin, the `stair` command and the plugin's Python environment move to the new version together. Details: https://github.com/StairAI/claude-plugins/blob/main/plugins/stair/CHANGES.md"
+      "title": "What's new in stair 0.12.2",
+      "text": "Several sessions open at once no longer lose or repeat each other's records. Details: https://github.com/StairAI/claude-plugins/blob/main/plugins/stair/CHANGES.md"
     }
   ],
   "changes": [
+    {
+      "version": "0.12.2",
+      "summary": "Several sessions open at once no longer lose or repeat each other's records.",
+      "you_do": [],
+      "items": [
+        "With several Claude Code sessions open, the uploads after each turn no longer run over one another: one at a time takes the queue, moving it aside first, so an event that arrives meanwhile waits for the next round instead of being lost.",
+        "A record the ledger's rules rule out is set aside (`spool.invalid.jsonl`, counted in `stair rl status`) instead of being retried forever.",
+        "The plugin run from its source directory keeps its state apart (`~/.stair-dev-src`), so a development copy never shares a queue with the installed plugin."
+      ]
+    },
+    {
+      "version": "0.12.1",
+      "summary": "A message to another session no longer names its recipient, and the privacy notice says where the viewer's protection ends.",
+      "you_do": [
+        "after updating, accept the privacy notice; Claude reads it to you and asks."
+      ],
+      "items": [
+        "Privacy: a message sent to another session or agent no longer writes the recipient's name, often a session's title, where the ledger can read it; only a keyed fingerprint of it.",
+        "Privacy: the privacy notice is now version 2026-10-30.2. It adds that an assistant able to act in your browser can see what you open there. Recording pauses until you accept it.",
+        "Privacy: records uploaded before 0.11.2 keep their plain fingerprints, since the ledger never rewrites a record. Fingerprints follow the master key, so after `stair rl key rotate` new records no longer match older ones.",
+        "After an update, the first session shows what the previous version left to say, such as a changed privacy notice, instead of skipping it.",
+        "On Linux the viewer opens a browser only when you run it yourself; run by an assistant, it says to run it in your own terminal.",
+        "`stair rl status` calls the SDK's own version number `sdk_package_version`, beside the pin that chose it (`sdk`)."
+      ]
+    },
+    {
+      "version": "0.12.0",
+      "summary": "The viewer works by grants: each view is a limited, recorded authorization, and your master key stays on your machine.",
+      "you_do": [
+        "after updating, accept the privacy notice; Claude reads it to you and asks."
+      ],
+      "items": [
+        "Privacy: `stair rl viewer` no longer puts your master key in the link. It grants a view of your sessions of the last seven days for an hour (`--days`, `--hours`): their keys are wrapped again here under a fresh key that only the link carries, and the grant is recorded in your ledger. When it ends, the ledger drops those keys and the link opens nothing.",
+        "Privacy: Claude is never shown the link's key. The plugin opens the link in your browser, or prints it only in a terminal of your own; when Claude Code runs on another machine, run `stair rl viewer` in a terminal there.",
+        "Privacy: the privacy notice is now version 2026-10-30.1, describing the viewer as it now works. Recording pauses until you accept it.",
+        "`stair rl grants` lists your grants; `stair rl revoke <grant>` ends one now."
+      ]
+    },
+    {
+      "version": "0.11.2",
+      "summary": "Notices no longer speak to Claude, fingerprints can no longer be guessed, and the privacy notice says how things work today.",
+      "you_do": [
+        "after updating, accept the new privacy notice; Claude reads it to you and asks."
+      ],
+      "items": [
+        "Privacy: the fingerprints that let records be matched without carrying text (the prompt that opened a turn, a task handed to another session, a file write, a thinking block) are computed with a key derived from yours, so nobody can test guesses against them.",
+        "Privacy: the words of the makers' notices are shown to you only. Claude is told only that there is a new version or a changed notice, and reads a new version's notes when you ask what it changes.",
+        "Privacy: the privacy notice is now version 2026-10-30. It describes the two changes above, says that the name you give this machine is readable on the ledger, and says plainly how the viewer works today. Recording pauses until you accept it.",
+        "A notice left by the version you updated from is no longer shown after the update.",
+        "Uploads wait longer for a slow ledger and go in smaller batches, so they no longer time out."
+      ]
+    },
     {
       "version": "0.11.1",
       "summary": "Updating is one step now: the plugin, the `stair` command and the plugin's Python environment move to the new version together.",

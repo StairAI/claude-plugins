@@ -15,12 +15,12 @@ Content is encrypted on this machine before upload (the SDK's ContentEncryption)
 State under $STAIR_HOME (default ~/.stair): config.json, owner.key, master.key, queue/events.jsonl, state/<transcript>.json, spool.jsonl, logs/.
 """
 from __future__ import annotations
-import json, os, sys, time, uuid, hashlib, argparse, socket, getpass, collections
+import json, os, re, sys, time, uuid, hashlib, hmac, argparse, socket, getpass, collections
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from mapper import Mapper, strip_none  # noqa: E402
+from mapper import Mapper, set_fingerprint_key, strip_none  # noqa: E402
 
 def plugin_name():
     """This copy's name from plugin.json: `stair` (the release channel) or `stair-dev` (the source repository)."""
@@ -42,12 +42,13 @@ def channel():
 NAME = plugin_name()
 CHANNEL = channel()
 # Each channel keeps its state under ~/.<name>: ~/.stair for the release channel, ~/.stair-dev for the source.
-HOME = Path(os.environ.get("STAIR_HOME") or os.environ.get("RL_PLUGIN_HOME") or Path.home() / ("." + NAME))
+# Run from anywhere but Claude Code's plugin cache (a source checkout, --plugin-dir), the state is kept apart: ~/.<name>-src.
+HOME = Path(os.environ.get("STAIR_HOME") or os.environ.get("RL_PLUGIN_HOME") or Path.home() / ("." + NAME + ("" if "/plugins/cache/" in str(HERE) else "-src")))
 QUEUE = HOME / "queue" / "events.jsonl"
-BATCH = 50
+BATCH = 25   # records per upload; with the longer read timeout below, a slow ledger no longer times a batch out
 # The privacy notice (PRIVACY.md beside this file) a person accepts at setup. Bumped whenever the notice changes in
 # substance; setup then asks again.
-PRIVACY_NOTICE_VERSION = "2026-10-29"
+PRIVACY_NOTICE_VERSION = "2026-10-30.2"
 
 def plugin_version():
     try: return json.load(open(HERE / ".claude-plugin" / "plugin.json", encoding="utf-8")).get("version") or "0"
@@ -116,13 +117,42 @@ def repair_event_line(line):
     try: return json.loads('{"event":"%s","ts":%s000,"payload":%s' % (m.group(1), m.group(2), line[m.end():]))
     except Exception: return None
 
+def fingerprint_key(cfg):
+    """The key content fingerprints are computed with (mapper.set_fingerprint_key): HKDF-SHA256 of the content master key,
+    so it never leaves this machine and changes with the master key. No master key (a plaintext ledger): plain SHA-256."""
+    p = master_key_path(cfg)
+    if not p: return None
+    try:
+        from reasoning_ledger import load_master_key
+        prk = hmac.new(b"stair-fingerprint", load_master_key(p), hashlib.sha256).digest()      # HKDF extract, fixed salt
+        return hmac.new(prk, b"stair fingerprint v1\x01", hashlib.sha256).digest()              # HKDF expand, one block
+    except Exception as e:
+        log("fingerprint-key", e); return None
+
+def patient_transport():
+    """The SDK's httpx transport with a read timeout of a minute instead of httpx's five seconds: a batch of encrypted
+    records can take the ledger longer than that (50 timeouts on 10-30, each then retried one record at a time)."""
+    import httpx
+    from reasoning_ledger.errors import NetworkError
+    from reasoning_ledger.http import HttpxTransport
+    from reasoning_ledger.types import HttpResponse
+    class PatientTransport(HttpxTransport):
+        def request(self, req):
+            try:
+                res = httpx.request(method=req["method"], url=req["url"], content=req.get("body"), headers=req["headers"],
+                                    timeout=httpx.Timeout(10.0, read=60.0))
+            except httpx.TransportError as exc:
+                raise NetworkError(f"Network error: {exc}") from exc
+            return HttpResponse(body=res.text, body_bytes=res.content, headers=dict(res.headers), status=res.status_code)
+    return PatientTransport()
+
 _client = None
 def client(cfg):
     global _client
     if _client is None:
         use_sdk_src(cfg)
         from reasoning_ledger import LedgerClient, LedgerClientConfig
-        _client = LedgerClient(LedgerClientConfig(api_key=api_key(cfg), agent_id=cfg["agent_id"], endpoint=cfg["endpoint"], encryption=encryption_for(cfg)))
+        _client = LedgerClient(LedgerClientConfig(api_key=api_key(cfg), agent_id=cfg["agent_id"], endpoint=cfg["endpoint"], encryption=encryption_for(cfg), http_transport=patient_transport()))
     return _client
 
 def upload(cfg, records):
@@ -177,6 +207,7 @@ def process_transcript(cfg, transcript, payload, st, dry=False):
     """Map the whole transcript, upload what is new, remember it."""
     conv = payload.get("session_id") or Path(transcript).stem
     mp = Mapper(cfg["agent_id"], cfg.get("device") or device_info(), thinking_text=cfg.get("thinking_text", "hash"))
+    set_fingerprint_key(fingerprint_key(cfg))   # keyed fingerprints, from the master key
     records, info = mp.map_transcript(transcript, conv, permission_events=[dict(p) for p in st.get("permissions", [])])
     # Sub-agent transcripts: their own sessions under the same conversation. The Agent call's result names the
     # sub-agent's id, so the mapper already set child_session_id on its Delegating; a call whose result did not is
@@ -200,11 +231,54 @@ def process_transcript(cfg, transcript, payload, st, dry=False):
     if dry: return records, new, info
     ok, failed = upload(cfg, new) if new else ([], [])
     st["uploaded"] = sorted(done | set(ok)); st["last_processed"] = now_ms(); st["info"] = info; save_state(st)
-    if failed:
-        HOME.mkdir(parents=True, exist_ok=True)
-        with open(HOME / "spool.jsonl", "a", encoding="utf-8") as f:
-            for x in failed: f.write(json.dumps(x, ensure_ascii=False, default=str) + "\n")
+    spool(failed)
     return records, new, {**info, "uploaded": len(ok), "failed": len(failed)}
+
+def lasting(err):
+    """Whether retrying cannot help: the record breaks the ledger's rules, by the SDK's check or by the server's (all but a
+    missing upstream, which may still arrive)."""
+    e = str(err)
+    return e.startswith("ValidationError(") or (e.startswith("validation_failed:") and "upstream_record_id" not in e)
+
+def spool(failed):
+    """Keep what failed: to retry (spool.jsonl, `flush`), or aside when retrying cannot help (spool.invalid.jsonl)."""
+    if not failed: return
+    HOME.mkdir(parents=True, exist_ok=True)
+    for name, keep in (("spool.jsonl", False), ("spool.invalid.jsonl", True)):
+        items = [x for x in failed if lasting(x.get("error")) == keep]
+        if items:
+            with open(HOME / name, "a", encoding="utf-8") as f:
+                for x in items: f.write(json.dumps(x, ensure_ascii=False, default=str) + "\n")
+
+LOCK = HOME / "process.lock"
+
+def hold_lock():
+    """One processor at a time per state directory: the queue, the spool and each transcript's state are read and written
+    whole. Several sessions each start one at the end of a turn; the others leave, and the one at work takes the queue
+    again before it stops. None when another holds it."""
+    import fcntl
+    HOME.mkdir(parents=True, exist_ok=True)
+    f = open(LOCK, "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); return f
+    except OSError:
+        f.close(); return None
+
+def take_queue():
+    """Move the queue aside, then read it: a hook that appends meanwhile starts a fresh queue, so no event is lost. Parts left
+    by a run that stopped halfway are read again (records are idempotent on the ledger)."""
+    QUEUE.parent.mkdir(parents=True, exist_ok=True)
+    parts = sorted(QUEUE.parent.glob("events.*.taken"))
+    if QUEUE.exists():
+        taken = QUEUE.with_name("events.%d.%d.taken" % (now_ms(), os.getpid())); os.replace(QUEUE, taken); parts.append(taken)
+    lines = []
+    for part in parts:
+        try: lines += [l for l in open(part, encoding="utf-8") if l.strip()]
+        except FileNotFoundError: pass
+    return lines, parts
+
+def queue_waiting():
+    return QUEUE.exists() or any(QUEUE.parent.glob("events.*.taken"))
 
 def process(args):
     cfg = load_config()
@@ -212,36 +286,48 @@ def process(args):
     paused = uploads_paused(cfg, fetch_notices(cfg))
     if paused:   # the queue keeps growing; nothing leaves this machine until the new notice is accepted
         log("paused", "privacy notice %s not accepted yet" % paused.get("privacy_notice_version")); refresh_notices(cfg); return 0
-    if not QUEUE.exists(): refresh_notices(cfg); return 0
-    time.sleep(args.delay)   # the transcript is written asynchronously and may lag the Stop hook by a moment
-    lines = [l for l in open(QUEUE, encoding="utf-8") if l.strip()]
-    open(QUEUE, "w").close()
-    by_transcript = {}; acts = {}
-    for l in lines:
-        try: ev = json.loads(l)
-        except Exception:
-            ev = repair_event_line(l)
-            if ev is None: continue
-        p = ev.get("payload") or {}; tp = p.get("transcript_path"); e = ev.get("event")
-        if not tp: continue
-        st = by_transcript.setdefault(tp, load_state(tp))
-        if e in ("PermissionRequest", "PermissionDenied"):
-            st.setdefault("permissions", []).append({"tool_name": p.get("tool_name"), "tool_use_id": p.get("tool_use_id"), "tool_input": p.get("tool_input"), "ts": ev.get("ts"), "denied": e == "PermissionDenied"})
-        elif e == "SubagentStop":
-            st.setdefault("subagents", []).append({"agent_id": p.get("agent_id"), "agent_type": p.get("agent_type"), "agent_transcript_path": p.get("agent_transcript_path"), "ts": ev.get("ts")})
-        if e in ("Stop", "SessionEnd"): acts[tp] = p
-    summary = []
-    for tp, st in by_transcript.items():
-        if tp not in acts:
-            save_state(st); continue
-        try:
-            _, new, info = process_transcript(cfg, tp, acts[tp], st)
-            summary.append({"transcript": tp, "new": len(new), **info})
-        except Exception as e:
-            log("process", e); save_state(st)
-    if summary: print(json.dumps(summary, ensure_ascii=False))
+    while True:
+        lock = hold_lock()
+        if lock is None: return 0          # another processor holds the queue; it takes it again before it lets go
+        try: drain(cfg, args)
+        finally: lock.close()
+        if not queue_waiting(): break      # nothing came in after its last take
     refresh_notices(cfg)
     return 0
+
+def drain(cfg, args):
+    """Take the queue and process it, until it stays empty."""
+    waited = False
+    while queue_waiting():
+        if not waited: time.sleep(args.delay); waited = True   # the transcript is written asynchronously, may lag the Stop hook
+        lines, parts = take_queue()
+        by_transcript = {}; acts = {}
+        for l in lines:
+            try: ev = json.loads(l)
+            except Exception:
+                ev = repair_event_line(l)
+                if ev is None: continue
+            p = ev.get("payload") or {}; tp = p.get("transcript_path"); e = ev.get("event")
+            if not tp: continue
+            st = by_transcript.setdefault(tp, load_state(tp))
+            if e in ("PermissionRequest", "PermissionDenied"):
+                st.setdefault("permissions", []).append({"tool_name": p.get("tool_name"), "tool_use_id": p.get("tool_use_id"), "tool_input": p.get("tool_input"), "ts": ev.get("ts"), "denied": e == "PermissionDenied"})
+            elif e == "SubagentStop":
+                st.setdefault("subagents", []).append({"agent_id": p.get("agent_id"), "agent_type": p.get("agent_type"), "agent_transcript_path": p.get("agent_transcript_path"), "ts": ev.get("ts")})
+            if e in ("Stop", "SessionEnd"): acts[tp] = p
+        summary = []
+        for tp, st in by_transcript.items():
+            if tp not in acts:
+                save_state(st); continue
+            try:
+                _, new, info = process_transcript(cfg, tp, acts[tp], st)
+                summary.append({"transcript": tp, "new": len(new), **info})
+            except Exception as e:
+                log("process", e); save_state(st)
+        if summary: print(json.dumps(summary, ensure_ascii=False))
+        for part in parts:
+            try: part.unlink()
+            except FileNotFoundError: pass
 
 
 def register_owner(endpoint, email, token=None, invite=None):
@@ -344,6 +430,8 @@ def setup(args):
 def status(args):
     cfg = load_config(); q = sum(1 for _ in open(QUEUE, encoding="utf-8")) if QUEUE.exists() else 0
     sp = sum(1 for _ in open(HOME / "spool.jsonl", encoding="utf-8")) if (HOME / "spool.jsonl").exists() else 0
+    invalid = sum(1 for _ in open(HOME / "spool.invalid.jsonl", encoding="utf-8")) if (HOME / "spool.invalid.jsonl").exists() else 0
+    q += sum(sum(1 for _ in open(t, encoding="utf-8")) for t in QUEUE.parent.glob("events.*.taken")) if QUEUE.parent.exists() else 0
     states = list((HOME / "state").glob("*.json")) if (HOME / "state").exists() else []
     up = 0
     for s in states:
@@ -360,27 +448,34 @@ def status(args):
     environment = {"python": sys.executable, "own": bool(venv) and sys.executable.startswith(venv), "sdk": os.environ.get("STAIR_SDK_SPEC_WANTED")}
     try:
         from importlib.metadata import version as dist_version
-        environment["sdk_version"] = dist_version("reasoning-ledger")
+        environment["sdk_package_version"] = dist_version("reasoning-ledger")   # the package's own number; `sdk` is the pin that chose it
     except Exception: pass
     cmd = Path.home() / ".local" / "bin" / NAME
     command = {"path": str(cmd), "kind": "absent"}
     if cmd.is_symlink(): command["kind"] = "link to %s" % os.readlink(cmd)
     elif cmd.exists(): command["kind"] = "follows the installed version" if "stair-command" in cmd.read_text(errors="replace")[:300] else "other"
     print(json.dumps({"ok": bool(cfg) and "error" not in enc, "configured": bool(cfg), "endpoint": cfg and cfg.get("endpoint"), "agent_id": cfg and cfg.get("agent_id"),
-                      "transcripts": len(states), "records_uploaded": up, "queued_events": q, "spooled": sp, "home": str(HOME), "encryption": enc,
+                      "transcripts": len(states), "records_uploaded": up, "queued_events": q, "spooled": sp, "set_aside": invalid, "home": str(HOME), "encryption": enc,
                       "privacy_notice": (cfg or {}).get("privacy_notice"), "owner": (cfg or {}).get("owner_email") or ("anonymous" if cfg else None),
                       "plugin": NAME + " " + plugin_version(), "channel": CHANNEL["STAIR_CHANNEL"], "notice_pending": NOTICE_PENDING.exists(),
                       "environment": environment, "command": command}))
     return 0
 
 def flush(args):
+    """Retry the spool. What the ledger's rules rule out goes aside to spool.invalid.jsonl instead of being retried forever."""
     cfg = load_config(); p = HOME / "spool.jsonl"
     if not cfg or not p.exists(): print(json.dumps({"ok": True, "flushed": 0})); return 0
-    items = [json.loads(l) for l in open(p, encoding="utf-8") if l.strip()]
-    ok, failed = upload(cfg, [x["record"] for x in items])
-    with open(p, "w", encoding="utf-8") as f:
-        for x in failed: f.write(json.dumps(x, ensure_ascii=False, default=str) + "\n")
-    print(json.dumps({"ok": not failed, "flushed": len(ok), "left": len(failed)})); return 0
+    lock = hold_lock()
+    if lock is None: print(json.dumps({"ok": False, "error": "a processor is at work; try again in a moment"})); return 1
+    try:
+        items = [json.loads(l) for l in open(p, encoding="utf-8") if l.strip()]
+        os.replace(p, p.with_name("spool.flushing.jsonl"))
+        ok, failed = upload(cfg, [x["record"] for x in items])
+        spool(failed); p.with_name("spool.flushing.jsonl").unlink()
+    finally:
+        lock.close()
+    aside = [x for x in failed if lasting(x.get("error"))]
+    print(json.dumps({"ok": len(aside) == len(failed), "flushed": len(ok), "left": len(failed) - len(aside), "set_aside": len(aside)})); return 0
 
 def mint_ticket(cfg, next_path=None):
     """Ask the ledger for a one-time viewer sign-in link: POST /v1/viewer/tickets with the owner key (the key never leaves this
@@ -392,29 +487,143 @@ def mint_ticket(cfg, next_path=None):
     with urllib.request.urlopen(req, timeout=15) as res:
         return json.loads(res.read().decode("utf-8"))
 
+GRANT_DAYS, GRANT_HOURS = 7, 1
+
+def how_to_show():
+    """Where a viewer link that carries a key may go: opened in this machine's browser ("open"), printed in a person's
+    own terminal ("print"), or nowhere (None): run by an assistant's tool, it would put the key in the model's context."""
+    import shutil
+    remote = bool(os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"))
+    if not remote and sys.platform == "darwin" and shutil.which("open"): return "open"
+    # On Linux a display is often a machine's virtual screen, driven by an assistant's browser: open one only for a person.
+    if not remote and sys.platform.startswith("linux") and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) and shutil.which("xdg-open") \
+            and sys.stdin.isatty():
+        return "open"
+    if sys.stdout.isatty() and sys.stdin.isatty(): return "print"
+    return None
+
+def open_in_browser(url):
+    import subprocess
+    try:
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+        return True
+    except Exception as e:
+        log("viewer-open", e); return False
+
+def grant_keys(cfg, days):
+    """This machine's data keys of the last `days` days, newest first (at most 5000), unwrapped here with the master key."""
+    import base64
+    from reasoning_ledger import load_master_key, master_key_id
+    from reasoning_ledger.encryption import open_sealed
+    mk = load_master_key(master_key_path(cfg)); mid = master_key_id(mk); since = now_ms() - int(days * 86400 * 1000)
+    found, after = [], None
+    while True:
+        page = owner_request(cfg, "GET", "/v1/content-keys?limit=1000&agent_id=%s%s" % (cfg["agent_id"], "&after=" + after if after else ""))
+        for k in page.get("keys") or []:
+            if k.get("master_key_id") == mid and (k.get("created_at") or 0) >= since:
+                found.append((k["created_at"], k["key_id"], open_sealed(mk, base64.b64decode(k["wrapped_key"]), k["key_id"])))
+        after = page.get("next_after")
+        if not after: break
+    found.sort(key=lambda f: f[0], reverse=True)
+    return [(kid, dek) for _, kid, dek in found[:5000]]
+
+def record_grant(cfg, answer, days, hours):
+    """The grant, as a record in the owner's ledger: the person authorized a view of these sessions until then."""
+    rec = {"schema_version": "0.5", "agent_id": cfg["agent_id"], "session_id": "stair:grants", "record_id": str(uuid.uuid4()),
+           "behavior": "Attesting", "client_ts_utc": now_ms(), "executor": "human", "record_phase": "post_execution",
+           "operator_id": "user", "gate_kind": "grant", "disposition": "approve", "outcome": "success", "channel": "interactive",
+           "decision": {"purpose": "view", "sessions": answer.get("sessions"), "days": days, "hours": hours, "expires_at": answer.get("expires_at")},
+           "written_by": {"component": "stair", "credential": "owner_api_key"}, "tags": ["grant:%s" % answer.get("grant_id")],
+           "classification": {"source": "instrumented", "mapper": "stair@0.12", "confidence": 1.0}}
+    try:
+        _, failed = upload(cfg, [rec])
+        if failed: log("grant-record", failed[0]["error"])
+    except Exception as e:
+        log("grant-record", e)
+
+def make_view_grant(cfg, days, hours):
+    """Grant a view: the keys of the last `days` days, wrapped again here under a fresh grant key, registered for `hours`
+    hours, and the grant recorded. Returns (the ledger's answer, the grant key as a link fragment); the answer is None when
+    the ledger cannot take grants (before 2.1.0), the fragment None when there is nothing to show."""
+    import base64
+    from reasoning_ledger import master_key_fragment, master_key_id
+    from reasoning_ledger.encryption import seal
+    keys = grant_keys(cfg, days)
+    if not keys: return {"sessions": 0}, None
+    g = os.urandom(32); gid = master_key_id(g)
+    body = {"purpose": "view", "expires_in": int(hours * 3600),
+            "keys": [{"key_id": kid, "master_key_id": gid, "wrap_alg": "A256GCM", "wrapped_key": base64.b64encode(seal(g, dek, kid)).decode()} for kid, dek in keys]}
+    answer = owner_request(cfg, "POST", "/v1/view-grants", body, missing_ok=True)
+    if answer is None: return None, None
+    record_grant(cfg, answer, days, hours)
+    return answer, master_key_fragment(g)
+
+def ticket_link(cfg, base, args):
+    """A one-time sign-in link without any key: the structure of the records; their content too on a ledger that keeps it
+    in the clear."""
+    t = mint_ticket(cfg, args.next)
+    url = base + t["ticket_url"]; secs = max(0, int((t["expires_at"] - now_ms()) / 1000))
+    if args.json: print(json.dumps({"ok": True, "url": url, "expires_in_s": secs, "one_time": True, "decrypts": False}))
+    else: print(url); print(f"one-time link, valid for {secs} s")
+    return 0
+
 def viewer(args):
-    """Print a one-time link that signs the browser into the viewer. The link is built from the viewer's public address
-    (`viewer_url` in config.json, or --base; the upload endpoint otherwise) and the ticket the server issued."""
+    """`viewer`: your records in the browser, decrypted there, by way of a view grant: a time-limited, revocable
+    authorization for the sessions of the last --days days (7), lasting --hours hours (1). The master key never leaves this
+    machine: the keys of those sessions are wrapped again here under a fresh grant key, which only the link carries (after
+    #, never sent to the server), and the grant is recorded in the ledger. The link is opened in this machine's browser, or
+    printed when this runs in a person's own terminal; never printed for an assistant. --no-key: the structure only."""
     cfg = load_config()
     if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
     if args.base and args.save:
         cfg["viewer_url"] = args.base.rstrip("/"); json.dump(cfg, open(HOME / "config.json", "w", encoding="utf-8"), indent=1)
     base = (args.base or cfg.get("viewer_url") or cfg["endpoint"]).rstrip("/")
-    t = mint_ticket(cfg, args.next)
-    url = base + t["ticket_url"]; secs = max(0, int((t["expires_at"] - now_ms()) / 1000))
-    # The content master key rides in the fragment: the browser keeps it for the tab and never sends it, and the
-    # viewer decrypts with it. The ticket is still what signs the browser in.
-    carries_key = False
-    if master_key_path(cfg) and not getattr(args, "no_key", False):
-        from reasoning_ledger import load_master_key, master_key_fragment
-        url += "#k=" + master_key_fragment(load_master_key(master_key_path(cfg))); carries_key = True
-    if args.json: print(json.dumps({"ok": True, "url": url, "expires_in_s": secs, "one_time": True, "decrypts": carries_key}))
+    if not master_key_path(cfg) or getattr(args, "no_key", False): return ticket_link(cfg, base, args)
+    how = how_to_show()
+    if how is None:
+        print(json.dumps({"ok": False, "error": "run `%s rl viewer` in a terminal of your own: its link carries a key, and an assistant is "
+                                                 "not shown keys (`%s rl viewer --no-key` here shows the structure without the content)" % (NAME, NAME)}))
+        return 2
+    answer, fragment = make_view_grant(cfg, args.days, args.hours)
+    if answer is None:
+        print("stair: this ledger cannot take view grants yet (it needs 2.1.0): the structure only, without the content", file=sys.stderr)
+        return ticket_link(cfg, base, args)
+    if not fragment:
+        print(json.dumps({"ok": True, "sessions": 0, "note": "nothing recorded on this machine in the last %s days" % args.days})); return 0
+    url = base + answer["grant_url"] + "#k=" + fragment
+    summary = {"ok": True, "grant_id": answer["grant_id"], "sessions": answer["sessions"], "expires_at": answer["expires_at"],
+               "revoke": "%s rl revoke %s" % (NAME, answer["grant_id"])}
+    if how == "open":
+        if open_in_browser(url):
+            print(json.dumps({**summary, "opened": "in this machine's browser"})); return 0
+        if not (sys.stdout.isatty() and sys.stdin.isatty()):   # no browser, and not a person's terminal: the key goes nowhere
+            print(json.dumps({**summary, "ok": False, "error": "could not open a browser; run `%s rl viewer` in a terminal of your own" % NAME})); return 1
+    if args.json: print(json.dumps({**summary, "url": url}))
     else:
-        print(url); print(f"one-time link, valid for {secs} s" + ("; it carries your content key, so share the link with nobody" if carries_key else ""))
+        until = time.strftime("%H:%M", time.localtime(answer["expires_at"] / 1000))
+        print(url)
+        print("opens %d sessions of the last %s days until %s; the link carries a key, so share it with nobody (`%s rl revoke %s` ends it now)"
+              % (answer["sessions"], args.days, until, NAME, answer["grant_id"]))
     return 0
 
-def owner_request(cfg, method, path, body=None):
-    """A request to the ledger as this owner, outside the SDK (the few owner-account calls)."""
+def grants_cmd(args):
+    """`grants`: the view grants of this account, newest first, without keys."""
+    cfg = load_config()
+    if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
+    r = owner_request(cfg, "GET", "/v1/view-grants", missing_ok=True)
+    print(json.dumps({"ok": r is not None, "grants": (r or {}).get("grants", []), **({} if r is not None else {"error": "this ledger has no view grants yet"})}))
+    return 0 if r is not None else 1
+
+def revoke_cmd(args):
+    """`revoke GRANT_ID`: end a view grant now; the ledger drops its keys and signs out the browsers it opened."""
+    cfg = load_config()
+    if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
+    r = owner_request(cfg, "DELETE", "/v1/view-grants/" + args.grant_id)
+    print(json.dumps({"ok": bool(r.get("revoked")), "grant_id": args.grant_id})); return 0
+
+def owner_request(cfg, method, path, body=None, missing_ok=False):
+    """A request to the ledger as this owner, outside the SDK (the few owner-account calls). missing_ok: None on a 404."""
     import urllib.request, urllib.error
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(cfg["endpoint"].rstrip("/") + path, data=data, method=method,
@@ -422,6 +631,7 @@ def owner_request(cfg, method, path, body=None):
     try:
         with urllib.request.urlopen(req, timeout=20) as res: return json.loads(res.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
+        if missing_ok and e.code == 404: return None
         detail = e.read().decode("utf-8", "replace")[:300]
         try: detail = json.loads(detail).get("message") or detail
         except Exception: pass
@@ -440,18 +650,21 @@ NOTICES_FILE = HOME / "notices.json"              # what was fetched, when, and 
 NOTICE_PENDING = HOME / "notice.pending.json"      # the next SessionStart hook prints this and renames it
 NOTICE_SHOWN = HOME / "notice.shown.json"
 NOTICES_EVERY_MS = 60 * 60 * 1000
+VERSION_RE = re.compile(r"\d+(\.\d+){1,3}")                    # what a plugin version in the notices file may look like
+NOTICE_VERSION_RE = re.compile(r"\d{4}-\d{2}-\d{2}(\.\d+)?")      # and a privacy notice version: anything else is ignored
 
 def version_tuple(v):
     try: return tuple(int(x) for x in str(v).split("-")[0].split("."))
     except Exception: return (0,)
 
-def fetch_notices(cfg, force=False):
+def fetch_notices(cfg, force=False, offline=False):
     """Fetch the channel's notices file (a public, static JSON beside the published plugin) at most hourly; never raises."""
     url = CHANNEL.get("STAIR_NOTICES_URL") or ""
     if not url: return None
     cache = {}
     try: cache = json.load(open(NOTICES_FILE, encoding="utf-8"))
     except Exception: pass
+    if offline: return cache or None   # what was last fetched, without the network (the SessionStart hook)
     if not force and cache.get("url") == url and now_ms() - (cache.get("fetched_at") or 0) < NOTICES_EVERY_MS: return cache
     import urllib.request
     try:
@@ -479,19 +692,22 @@ def pending_notices(cfg, cache):
     privacy notice newer than the one accepted (uploads pause until it is), and plain messages."""
     if not cache: return []
     seen = set(cache.get("seen") or []); out = []
-    latest = (cache.get("latest_version") or {}).get(NAME)
+    latest = str((cache.get("latest_version") or {}).get(NAME) or "")
     installed = plugin_version()
-    if latest and version_tuple(latest) > version_tuple(installed):
+    if VERSION_RE.fullmatch(latest) and version_tuple(latest) > version_tuple(installed):
         # What changes between the installed version and the new one, newest first (publish.sh puts CHANGES.md there).
         changes = [c for c in cache.get("changes") or [] if isinstance(c, dict)
                    and version_tuple(installed) < version_tuple(c.get("version")) <= version_tuple(latest)]
         changes.sort(key=lambda c: version_tuple(c.get("version")), reverse=True)
-        out.append({"id": "update:%s" % latest, "kind": "update", "title": "%s %s is available (you have %s)" % (NAME, latest, installed), "changes": changes})
+        out.append({"id": "update:%s" % latest, "kind": "update", "latest": latest, "installed": installed,
+                    "title": "%s %s is available (you have %s)" % (NAME, latest, installed), "changes": changes})
     accepted = ((cfg or {}).get("privacy_notice") or {}).get("version") or ""
     for n in cache.get("notices") or []:
+        if not isinstance(n, dict): continue
         nid = n.get("id")
-        if not nid or nid in seen: continue
-        if n.get("kind") == "changes": continue   # "what's new" as a plain message, for versions before 0.11.1 only
+        if not isinstance(nid, str) or not nid or nid in seen: continue
+        if n.get("kind") in ("changes", "update"): continue   # "what's new" for versions before 0.11.1; updates come from latest_version
+        if n.get("kind") == "privacy" and not NOTICE_VERSION_RE.fullmatch(str(n.get("privacy_notice_version") or "")): continue
         if n.get("until") and str(n["until"]) < time.strftime("%Y-%m-%d"): continue
         if n.get("channel") and n["channel"] != CHANNEL["STAIR_CHANNEL"]: continue
         if n.get("kind") == "privacy" and n.get("privacy_notice_version") and str(n["privacy_notice_version"]) <= accepted: continue
@@ -502,47 +718,56 @@ def uploads_paused(cfg, cache):
     """Uploads stop when the makers published a privacy notice newer than the one this person accepted."""
     accepted = ((cfg or {}).get("privacy_notice") or {}).get("version") or ""
     for n in (cache or {}).get("notices") or []:
-        if n.get("kind") == "privacy" and n.get("privacy_notice_version") and str(n["privacy_notice_version"]) > accepted: return n
+        v = str(n.get("privacy_notice_version") or "") if isinstance(n, dict) else ""
+        if n.get("kind") == "privacy" and NOTICE_VERSION_RE.fullmatch(v) and v > accepted: return n
     return None
 
+def changes_file(mkt):
+    """Where a new version's CHANGES.md is once the marketplace is refreshed: Claude Code's copy of the marketplace (a path
+    built here, not taken from the notices file); running from source, the published file."""
+    if len(HERE.parents) > 3 and HERE.parents[2].name == "cache":
+        return str(HERE.parents[3] / "marketplaces" / mkt / "plugins" / NAME / "CHANGES.md")
+    return "https://github.com/StairAI/claude-plugins/blob/%s/plugins/%s/CHANGES.md" % ("staging" if NAME == "stair-dev" else "main", NAME)
+
 def render_pending(pending, paused):
-    """What the SessionStart hook prints: a line for the person, and context for the assistant, who asks before acting."""
+    """What the SessionStart hook prints. The person gets one line, which may quote the makers' words (systemMessage).
+    Claude gets only sentences built here from version numbers and kinds (additionalContext), never text from the notices
+    file: whoever can change that file could otherwise instruct every installed assistant without a release."""
     if not pending and not paused: return None
-    lines = []; ctx = ["Stair plugin (%s) notices for this machine. Tell the person in one or two lines; ask before running anything." % NAME]
+    mkt = "stair-ai-dev" if NAME == "stair-dev" else "stair-ai"
+    update = "claude plugin marketplace update %s && claude plugin update %s@%s" % (mkt, NAME, mkt)
+    lines = []; ctx = ["Stair plugin (%s) notices for this machine, shown to the person as one line. Ask before running anything." % NAME]
     for n in pending:
-        kind = n.get("kind"); title = n.get("title") or n.get("id"); text = n.get("text") or ""
+        kind = n.get("kind")
         if kind == "update":
             changes = n.get("changes") or []
-            summary = (changes[0].get("summary") or "").strip().rstrip(".") if changes else ""
-            lines.append("Stair: " + title + (": " + summary if summary else "") + ". Say \"update stair\" to update" + (", or ask what changed." if changes else "."))
-            mkt = "stair-ai-dev" if NAME == "stair-dev" else "stair-ai"
-            # `claude plugin update` alone compares against the local copy of the marketplace, which is only refreshed by
-            # `claude plugin marketplace update`; without it the update reports the installed version as the latest.
-            ctx.append("Update available: %s. If they want it, run `claude plugin marketplace update %s && claude plugin update %s@%s` "
-                       "(both, in this order: the first fetches the marketplace), then tell them the new version applies to sessions "
-                       "started after the update; the `%s` command and the plugin's Python environment follow by themselves." % (title, mkt, NAME, mkt, NAME))
-            if changes:
-                ctx.append("What the update changes, newest first. If they ask what is new, tell them from this list, in their language, "
-                           "and say first anything marked \"You do\":")
-                for c in changes:
-                    ctx.append("- %s: %s" % (c.get("version"), c.get("summary") or ""))
-                    ctx.extend("  - You do: " + y for y in c.get("you_do") or [])
-                    ctx.extend("  - " + i for i in c.get("items") or [])
+            summary = str(changes[0].get("summary") or "").strip().rstrip(".") if changes else ""
+            lines.append("Stair: %s %s is available (you have %s)%s. Say \"update stair\" to update, or ask what changed." % (NAME, n["latest"], n["installed"], ": " + summary if summary else ""))
+            ctx.append("Update available: %s %s (installed: %s). If they want it, run `%s` (both, in this order: the first fetches the "
+                       "marketplace), then tell them the new version applies to sessions started after the update; the `%s` command and the "
+                       "plugin's Python environment follow by themselves." % (NAME, n["latest"], n["installed"], update, NAME))
+            ctx.append("If they ask what it changes: run only `claude plugin marketplace update %s`, then read the entries newer than %s in %s and "
+                       "tell them in their language, anything starting with \"Privacy:\" or \"You do:\" first." % (mkt, n["installed"], changes_file(mkt)))
         elif kind == "privacy":
-            lines.append("Stair: the privacy notice changed (%s); recording is paused until you accept it." % n.get("privacy_notice_version"))
-            ctx.append("Privacy notice changed to version %s: %s Uploads are paused until accepted. Update the plugin if the installed PRIVACY.md is older, read PRIVACY.md to the person in their language, ask for consent, and only with a clear yes run `%s rl accept-notice %s`." % (n.get("privacy_notice_version"), text, NAME, n.get("privacy_notice_version")))
+            v = n["privacy_notice_version"]
+            lines.append("Stair: the privacy notice changed (%s); recording is paused until you accept it.%s" % (v, " " + str(n["text"]) if n.get("text") else ""))
+            ctx.append("The privacy notice changed to version %s and uploads are paused until the person accepts it. If the installed PRIVACY.md is "
+                       "older, update the plugin first (`%s`, then a new session). Read PRIVACY.md from the plugin directory to them in their "
+                       "language, ask for consent, and only with a clear yes run `%s rl accept-notice %s`." % (v, update, NAME, v))
         else:
-            lines.append("Stair: " + title + (": " + text if text else ""))
-            ctx.append("Message from the makers: %s %s" % (title, text))
+            lines.append("Stair: " + str(n.get("title") or "") + (": " + str(n["text"]) if n.get("text") else ""))
+            ctx.append("The plugin's makers left the person a message, shown to them; you are not given its words.")
     if paused and not any(n.get("kind") == "privacy" for n in pending):
-        lines.append("Stair: recording is paused until the new privacy notice (%s) is accepted." % paused.get("privacy_notice_version"))
-    return {"ids": [n["id"] for n in pending], "systemMessage": " ".join(lines),
+        lines.append("Stair: recording is paused until the new privacy notice (%s) is accepted." % paused["privacy_notice_version"])
+        ctx.append("Uploads are paused until the person accepts privacy notice %s: update the plugin if its PRIVACY.md is older (`%s`), read "
+                   "PRIVACY.md to them, and only with a clear yes run `%s rl accept-notice %s`." % (paused["privacy_notice_version"], update, NAME, paused["privacy_notice_version"]))
+    return {"ids": [n["id"] for n in pending], "for_version": plugin_version(), "systemMessage": " ".join(lines),
             "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "\n".join(ctx)}}
 
-def refresh_notices(cfg, force=False):
+def refresh_notices(cfg, force=False, offline=False):
     """After an upload run: record what was shown, fetch, and leave what should be said next for the SessionStart hook."""
     mark_shown()
-    cache = fetch_notices(cfg, force=force)
+    cache = fetch_notices(cfg, force=force, offline=offline)
     out = render_pending(pending_notices(cfg, cache), uploads_paused(cfg, cache))
     if out:
         NOTICE_PENDING.parent.mkdir(parents=True, exist_ok=True); json.dump(out, open(NOTICE_PENDING, "w", encoding="utf-8"), indent=1)
@@ -552,6 +777,9 @@ def refresh_notices(cfg, force=False):
 
 def notices_cmd(args):
     cfg = load_config() or {}
+    if getattr(args, "rebuild", False):   # the SessionStart hook, after an update: this version's notice, from what was last fetched
+        if cfg: refresh_notices(cfg, offline=True)
+        return 0
     cache = fetch_notices(cfg, force=args.fetch) or {}
     print(json.dumps({"ok": True, "fetched_at": cache.get("fetched_at"), "latest_version": cache.get("latest_version"), "installed": NAME + " " + plugin_version(),
                       "pending": pending_notices(cfg, cache), "uploads_paused": bool(uploads_paused(cfg, cache)), "seen": cache.get("seen") or []}, ensure_ascii=False, indent=1))
@@ -653,12 +881,14 @@ def main():
     s.add_argument("--viewer-url", default=None, help="the viewer's public address when it differs from the endpoint (e.g. an HTTPS proxy)")
     sub.add_parser("status"); sub.add_parser("flush")
     v = sub.add_parser("viewer"); v.add_argument("--next", default=None, help="path to open after signing in"); v.add_argument("--base", default=None, help="viewer address to put in front of the ticket")
+    v.add_argument("--days", type=float, default=GRANT_DAYS, help="grant a view of the sessions of the last DAYS days (default %(default)s)"); v.add_argument("--hours", type=float, default=GRANT_HOURS, help="for HOURS hours, at most 24 (default %(default)s)")
+    sub.add_parser("grants", help="your view grants, newest first"); rv = sub.add_parser("revoke", help="end a view grant now"); rv.add_argument("grant_id")
     v.add_argument("--save", action="store_true", help="remember --base as viewer_url in config.json"); v.add_argument("--json", action="store_true")
     v.add_argument("--no-key", action="store_true", help="leave the content master key out of the link (encrypted content then stays encrypted in the viewer)")
     m = sub.add_parser("map"); m.add_argument("transcript"); m.add_argument("--conv", default=None); m.add_argument("--dump", default=None)
     k = sub.add_parser("key", help="the content master key"); k.add_argument("key_cmd", choices=["id", "rotate"])
     c = sub.add_parser("claim", help="give this anonymous owner an e-mail"); c.add_argument("email")
-    n = sub.add_parser("notices", help="what the plugin's makers want you to know"); n.add_argument("--fetch", action="store_true", help="fetch now instead of using the hourly cache")
+    n = sub.add_parser("notices", help="what the plugin's makers want you to know"); n.add_argument("--fetch", action="store_true", help="fetch now instead of using the hourly cache"); n.add_argument("--rebuild", action="store_true", help="write the next session's notice again from what was last fetched, without the network")
     acc = sub.add_parser("accept-notice", help="accept the current privacy notice after reading PRIVACY.md"); acc.add_argument("version")
     ad = sub.add_parser("admin", help="operator commands, with the ledger's administrator token"); adsub = ad.add_subparsers(dest="admin_cmd")
     for name in ("new", "list", "revoke"):
@@ -671,7 +901,7 @@ def main():
     ad.add_argument("what", nargs="?", default="invites", help=argparse.SUPPRESS)
     a = ap.parse_args()
     fn = {"process": process, "setup": setup, "status": status, "flush": flush, "map": map_cmd, "viewer": viewer, "key": key_cmd, "admin": admin_cmd,
-          "claim": claim, "notices": notices_cmd, "accept-notice": accept_notice}.get(a.cmd)
+          "claim": claim, "notices": notices_cmd, "accept-notice": accept_notice, "grants": grants_cmd, "revoke": revoke_cmd}.get(a.cmd)
     if fn is None: ap.print_help(); return 1
     return fn(a)
 
