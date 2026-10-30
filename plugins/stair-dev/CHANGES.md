@@ -2,6 +2,13 @@
 
 What each version of the Stair plugin for Claude Code changes for the person using it, newest first. When a newer version is out, the plugin says so at the start of a session together with the entries between your version and the new one, and Claude tells you more when you ask. A line that starts with "You do:" is something you have to do; it is said first.
 
+## 0.12.4
+
+A long upload, such as the first after an update, no longer leaves failed pieces for you to retry by hand.
+
+- Records that failed to upload for a passing reason, such as the network, are sent again by the plugin itself, at most every ten minutes.
+- Privacy notice versions of the same day compare by number, so a tenth version of a day comes after the second.
+
 ## 0.12.3
 
 The first session after an update says when recording is paused for a privacy notice, even on a machine that never fetched one.
