@@ -15,12 +15,12 @@ Content is encrypted on this machine before upload (the SDK's ContentEncryption)
 State under $STAIR_HOME (default ~/.stair): config.json, owner.key, master.key, queue/events.jsonl, state/<transcript>.json, spool.jsonl, logs/.
 """
 from __future__ import annotations
-import json, os, sys, time, uuid, hashlib, argparse, socket, getpass, collections
+import json, os, re, sys, time, uuid, hashlib, hmac, argparse, socket, getpass, collections
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from mapper import Mapper, strip_none  # noqa: E402
+from mapper import Mapper, set_fingerprint_key, strip_none  # noqa: E402
 
 def plugin_name():
     """This copy's name from plugin.json: `stair` (the release channel) or `stair-dev` (the source repository)."""
@@ -44,10 +44,10 @@ CHANNEL = channel()
 # Each channel keeps its state under ~/.<name>: ~/.stair for the release channel, ~/.stair-dev for the source.
 HOME = Path(os.environ.get("STAIR_HOME") or os.environ.get("RL_PLUGIN_HOME") or Path.home() / ("." + NAME))
 QUEUE = HOME / "queue" / "events.jsonl"
-BATCH = 50
+BATCH = 25   # records per upload; with the longer read timeout below, a slow ledger no longer times a batch out
 # The privacy notice (PRIVACY.md beside this file) a person accepts at setup. Bumped whenever the notice changes in
 # substance; setup then asks again.
-PRIVACY_NOTICE_VERSION = "2026-10-29"
+PRIVACY_NOTICE_VERSION = "2026-10-30"
 
 def plugin_version():
     try: return json.load(open(HERE / ".claude-plugin" / "plugin.json", encoding="utf-8")).get("version") or "0"
@@ -116,13 +116,42 @@ def repair_event_line(line):
     try: return json.loads('{"event":"%s","ts":%s000,"payload":%s' % (m.group(1), m.group(2), line[m.end():]))
     except Exception: return None
 
+def fingerprint_key(cfg):
+    """The key content fingerprints are computed with (mapper.set_fingerprint_key): HKDF-SHA256 of the content master key,
+    so it never leaves this machine and changes with the master key. No master key (a plaintext ledger): plain SHA-256."""
+    p = master_key_path(cfg)
+    if not p: return None
+    try:
+        from reasoning_ledger import load_master_key
+        prk = hmac.new(b"stair-fingerprint", load_master_key(p), hashlib.sha256).digest()      # HKDF extract, fixed salt
+        return hmac.new(prk, b"stair fingerprint v1\x01", hashlib.sha256).digest()              # HKDF expand, one block
+    except Exception as e:
+        log("fingerprint-key", e); return None
+
+def patient_transport():
+    """The SDK's httpx transport with a read timeout of a minute instead of httpx's five seconds: a batch of encrypted
+    records can take the ledger longer than that (50 timeouts on 10-30, each then retried one record at a time)."""
+    import httpx
+    from reasoning_ledger.errors import NetworkError
+    from reasoning_ledger.http import HttpxTransport
+    from reasoning_ledger.types import HttpResponse
+    class PatientTransport(HttpxTransport):
+        def request(self, req):
+            try:
+                res = httpx.request(method=req["method"], url=req["url"], content=req.get("body"), headers=req["headers"],
+                                    timeout=httpx.Timeout(10.0, read=60.0))
+            except httpx.TransportError as exc:
+                raise NetworkError(f"Network error: {exc}") from exc
+            return HttpResponse(body=res.text, body_bytes=res.content, headers=dict(res.headers), status=res.status_code)
+    return PatientTransport()
+
 _client = None
 def client(cfg):
     global _client
     if _client is None:
         use_sdk_src(cfg)
         from reasoning_ledger import LedgerClient, LedgerClientConfig
-        _client = LedgerClient(LedgerClientConfig(api_key=api_key(cfg), agent_id=cfg["agent_id"], endpoint=cfg["endpoint"], encryption=encryption_for(cfg)))
+        _client = LedgerClient(LedgerClientConfig(api_key=api_key(cfg), agent_id=cfg["agent_id"], endpoint=cfg["endpoint"], encryption=encryption_for(cfg), http_transport=patient_transport()))
     return _client
 
 def upload(cfg, records):
@@ -177,6 +206,7 @@ def process_transcript(cfg, transcript, payload, st, dry=False):
     """Map the whole transcript, upload what is new, remember it."""
     conv = payload.get("session_id") or Path(transcript).stem
     mp = Mapper(cfg["agent_id"], cfg.get("device") or device_info(), thinking_text=cfg.get("thinking_text", "hash"))
+    set_fingerprint_key(fingerprint_key(cfg))   # keyed fingerprints, from the master key
     records, info = mp.map_transcript(transcript, conv, permission_events=[dict(p) for p in st.get("permissions", [])])
     # Sub-agent transcripts: their own sessions under the same conversation. The Agent call's result names the
     # sub-agent's id, so the mapper already set child_session_id on its Delegating; a call whose result did not is
@@ -440,6 +470,8 @@ NOTICES_FILE = HOME / "notices.json"              # what was fetched, when, and 
 NOTICE_PENDING = HOME / "notice.pending.json"      # the next SessionStart hook prints this and renames it
 NOTICE_SHOWN = HOME / "notice.shown.json"
 NOTICES_EVERY_MS = 60 * 60 * 1000
+VERSION_RE = re.compile(r"\d+(\.\d+){1,3}")                    # what a plugin version in the notices file may look like
+NOTICE_VERSION_RE = re.compile(r"\d{4}-\d{2}-\d{2}(\.\d+)?")      # and a privacy notice version: anything else is ignored
 
 def version_tuple(v):
     try: return tuple(int(x) for x in str(v).split("-")[0].split("."))
@@ -479,19 +511,22 @@ def pending_notices(cfg, cache):
     privacy notice newer than the one accepted (uploads pause until it is), and plain messages."""
     if not cache: return []
     seen = set(cache.get("seen") or []); out = []
-    latest = (cache.get("latest_version") or {}).get(NAME)
+    latest = str((cache.get("latest_version") or {}).get(NAME) or "")
     installed = plugin_version()
-    if latest and version_tuple(latest) > version_tuple(installed):
+    if VERSION_RE.fullmatch(latest) and version_tuple(latest) > version_tuple(installed):
         # What changes between the installed version and the new one, newest first (publish.sh puts CHANGES.md there).
         changes = [c for c in cache.get("changes") or [] if isinstance(c, dict)
                    and version_tuple(installed) < version_tuple(c.get("version")) <= version_tuple(latest)]
         changes.sort(key=lambda c: version_tuple(c.get("version")), reverse=True)
-        out.append({"id": "update:%s" % latest, "kind": "update", "title": "%s %s is available (you have %s)" % (NAME, latest, installed), "changes": changes})
+        out.append({"id": "update:%s" % latest, "kind": "update", "latest": latest, "installed": installed,
+                    "title": "%s %s is available (you have %s)" % (NAME, latest, installed), "changes": changes})
     accepted = ((cfg or {}).get("privacy_notice") or {}).get("version") or ""
     for n in cache.get("notices") or []:
+        if not isinstance(n, dict): continue
         nid = n.get("id")
-        if not nid or nid in seen: continue
-        if n.get("kind") == "changes": continue   # "what's new" as a plain message, for versions before 0.11.1 only
+        if not isinstance(nid, str) or not nid or nid in seen: continue
+        if n.get("kind") in ("changes", "update"): continue   # "what's new" for versions before 0.11.1; updates come from latest_version
+        if n.get("kind") == "privacy" and not NOTICE_VERSION_RE.fullmatch(str(n.get("privacy_notice_version") or "")): continue
         if n.get("until") and str(n["until"]) < time.strftime("%Y-%m-%d"): continue
         if n.get("channel") and n["channel"] != CHANNEL["STAIR_CHANNEL"]: continue
         if n.get("kind") == "privacy" and n.get("privacy_notice_version") and str(n["privacy_notice_version"]) <= accepted: continue
@@ -502,41 +537,50 @@ def uploads_paused(cfg, cache):
     """Uploads stop when the makers published a privacy notice newer than the one this person accepted."""
     accepted = ((cfg or {}).get("privacy_notice") or {}).get("version") or ""
     for n in (cache or {}).get("notices") or []:
-        if n.get("kind") == "privacy" and n.get("privacy_notice_version") and str(n["privacy_notice_version"]) > accepted: return n
+        v = str(n.get("privacy_notice_version") or "") if isinstance(n, dict) else ""
+        if n.get("kind") == "privacy" and NOTICE_VERSION_RE.fullmatch(v) and v > accepted: return n
     return None
 
+def changes_file(mkt):
+    """Where a new version's CHANGES.md is once the marketplace is refreshed: Claude Code's copy of the marketplace (a path
+    built here, not taken from the notices file); running from source, the published file."""
+    if len(HERE.parents) > 3 and HERE.parents[2].name == "cache":
+        return str(HERE.parents[3] / "marketplaces" / mkt / "plugins" / NAME / "CHANGES.md")
+    return "https://github.com/StairAI/claude-plugins/blob/%s/plugins/%s/CHANGES.md" % ("staging" if NAME == "stair-dev" else "main", NAME)
+
 def render_pending(pending, paused):
-    """What the SessionStart hook prints: a line for the person, and context for the assistant, who asks before acting."""
+    """What the SessionStart hook prints. The person gets one line, which may quote the makers' words (systemMessage).
+    Claude gets only sentences built here from version numbers and kinds (additionalContext), never text from the notices
+    file: whoever can change that file could otherwise instruct every installed assistant without a release."""
     if not pending and not paused: return None
-    lines = []; ctx = ["Stair plugin (%s) notices for this machine. Tell the person in one or two lines; ask before running anything." % NAME]
+    mkt = "stair-ai-dev" if NAME == "stair-dev" else "stair-ai"
+    update = "claude plugin marketplace update %s && claude plugin update %s@%s" % (mkt, NAME, mkt)
+    lines = []; ctx = ["Stair plugin (%s) notices for this machine, shown to the person as one line. Ask before running anything." % NAME]
     for n in pending:
-        kind = n.get("kind"); title = n.get("title") or n.get("id"); text = n.get("text") or ""
+        kind = n.get("kind")
         if kind == "update":
             changes = n.get("changes") or []
-            summary = (changes[0].get("summary") or "").strip().rstrip(".") if changes else ""
-            lines.append("Stair: " + title + (": " + summary if summary else "") + ". Say \"update stair\" to update" + (", or ask what changed." if changes else "."))
-            mkt = "stair-ai-dev" if NAME == "stair-dev" else "stair-ai"
-            # `claude plugin update` alone compares against the local copy of the marketplace, which is only refreshed by
-            # `claude plugin marketplace update`; without it the update reports the installed version as the latest.
-            ctx.append("Update available: %s. If they want it, run `claude plugin marketplace update %s && claude plugin update %s@%s` "
-                       "(both, in this order: the first fetches the marketplace), then tell them the new version applies to sessions "
-                       "started after the update; the `%s` command and the plugin's Python environment follow by themselves." % (title, mkt, NAME, mkt, NAME))
-            if changes:
-                ctx.append("What the update changes, newest first. If they ask what is new, tell them from this list, in their language, "
-                           "and say first anything marked \"You do\":")
-                for c in changes:
-                    ctx.append("- %s: %s" % (c.get("version"), c.get("summary") or ""))
-                    ctx.extend("  - You do: " + y for y in c.get("you_do") or [])
-                    ctx.extend("  - " + i for i in c.get("items") or [])
+            summary = str(changes[0].get("summary") or "").strip().rstrip(".") if changes else ""
+            lines.append("Stair: %s %s is available (you have %s)%s. Say \"update stair\" to update, or ask what changed." % (NAME, n["latest"], n["installed"], ": " + summary if summary else ""))
+            ctx.append("Update available: %s %s (installed: %s). If they want it, run `%s` (both, in this order: the first fetches the "
+                       "marketplace), then tell them the new version applies to sessions started after the update; the `%s` command and the "
+                       "plugin's Python environment follow by themselves." % (NAME, n["latest"], n["installed"], update, NAME))
+            ctx.append("If they ask what it changes: run only `claude plugin marketplace update %s`, then read the entries newer than %s in %s and "
+                       "tell them in their language, anything starting with \"Privacy:\" or \"You do:\" first." % (mkt, n["installed"], changes_file(mkt)))
         elif kind == "privacy":
-            lines.append("Stair: the privacy notice changed (%s); recording is paused until you accept it." % n.get("privacy_notice_version"))
-            ctx.append("Privacy notice changed to version %s: %s Uploads are paused until accepted. Update the plugin if the installed PRIVACY.md is older, read PRIVACY.md to the person in their language, ask for consent, and only with a clear yes run `%s rl accept-notice %s`." % (n.get("privacy_notice_version"), text, NAME, n.get("privacy_notice_version")))
+            v = n["privacy_notice_version"]
+            lines.append("Stair: the privacy notice changed (%s); recording is paused until you accept it.%s" % (v, " " + str(n["text"]) if n.get("text") else ""))
+            ctx.append("The privacy notice changed to version %s and uploads are paused until the person accepts it. If the installed PRIVACY.md is "
+                       "older, update the plugin first (`%s`, then a new session). Read PRIVACY.md from the plugin directory to them in their "
+                       "language, ask for consent, and only with a clear yes run `%s rl accept-notice %s`." % (v, update, NAME, v))
         else:
-            lines.append("Stair: " + title + (": " + text if text else ""))
-            ctx.append("Message from the makers: %s %s" % (title, text))
+            lines.append("Stair: " + str(n.get("title") or "") + (": " + str(n["text"]) if n.get("text") else ""))
+            ctx.append("The plugin's makers left the person a message, shown to them; you are not given its words.")
     if paused and not any(n.get("kind") == "privacy" for n in pending):
-        lines.append("Stair: recording is paused until the new privacy notice (%s) is accepted." % paused.get("privacy_notice_version"))
-    return {"ids": [n["id"] for n in pending], "systemMessage": " ".join(lines),
+        lines.append("Stair: recording is paused until the new privacy notice (%s) is accepted." % paused["privacy_notice_version"])
+        ctx.append("Uploads are paused until the person accepts privacy notice %s: update the plugin if its PRIVACY.md is older (`%s`), read "
+                   "PRIVACY.md to them, and only with a clear yes run `%s rl accept-notice %s`." % (paused["privacy_notice_version"], update, NAME, paused["privacy_notice_version"]))
+    return {"ids": [n["id"] for n in pending], "for_version": plugin_version(), "systemMessage": " ".join(lines),
             "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "\n".join(ctx)}}
 
 def refresh_notices(cfg, force=False):

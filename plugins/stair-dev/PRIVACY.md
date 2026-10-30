@@ -1,6 +1,6 @@
 # What Stair records, and who can see it
 
-Notice version `2026-10-29`. Setup asks you to accept this version; the plugin records that you did.
+Notice version `2026-10-30`. Setup asks you to accept this version; the plugin records that you did.
 
 ## What is recorded
 
@@ -11,8 +11,8 @@ Every turn of every Claude Code session on this machine, from the transcript Cla
 - questions Claude asked you and your answers; permission prompts and what you did with them;
 - sub-agents Claude started and what they were asked;
 - plans (how many steps, how long each; the words of the plan are content, below) and writes to memory files, CLAUDE.md, skills and settings;
-- thinking blocks, as a fingerprint only (size and hash); their text never leaves this machine;
-- file writes, as a pointer (path and hash), carried as content; the file's content never leaves this machine.
+- thinking blocks, as a fingerprint only (size and a keyed hash, below); their text never leaves this machine;
+- file writes, as a pointer (path and a keyed hash), carried as content; the file's content never leaves this machine.
 
 The hooks do not read anything else on this machine. Nothing is asked of the model: it does not know it is being recorded and is not asked to record anything.
 
@@ -22,19 +22,21 @@ Records go to one place: the ledger endpoint you give at setup (the hosted ledge
 
 So the ledger, and the people who run it, can see the **structure** of your work: that a prompt came in, which tools were called in what order, how long they took, whether they succeeded, token counts, timestamps, the names of tools, how many characters each text had, how many steps a plan had, what kind of question or permission was raised, the class of an error, the type of a sub-agent. They **cannot** see the words: not your prompts, not the answers, not what tools were given or returned, not what was asked, the options offered or what was delegated, not the wording of a plan or a verdict, not file paths or memory targets (those are pointers, carried as content). The plugin's tests check that no word of a session appears outside the encrypted positions.
 
+Where a record has to match or tell texts apart without carrying them (the prompt that opened a turn, a task handed to another session, a file write, a thinking block), it carries a fingerprint computed with a key derived from yours. Without your key nobody can test a guess against it, not even for a one-word prompt.
+
 If a tool's name is itself something you must not share, or the shape of your work is, keep the plugin off that machine.
 
 ## Who you are to the ledger
 
-Nobody, unless you say so. The account is anonymous: two keys made on this machine are its identity, and the ledger holds no e-mail for it unless you attach one (`stair rl claim you@example.com`), which you may do at any time or never. An attached e-mail lets you find the account again and, later, recover it; it is never used for anything else.
+Nobody, unless you say so. The account is anonymous: two keys made on this machine are its identity, and the ledger holds no e-mail for it unless you attach one (`stair rl claim you@example.com`), which you may do at any time or never. An attached e-mail lets you find the account again and, later, recover it; it is never used for anything else. The name you give this machine at setup is stored as it is and is readable on the ledger: choose one that says nothing you would not want there.
 
 ## What you can do
 
-- Look at your own records, decrypted in your browser: `stair rl viewer`. The link carries your key after `#`; the browser never sends it to the server.
+- Look at your own records, decrypted in your browser: `stair rl viewer`. The page comes from the ledger's server and decrypts with your key, which the link carries after `#`: the browser does not send it to the server, but keeps it in its history, and whoever runs the server could change the page. Open it in your own browser only. A version in which each view is a limited, recorded authorization is being built.
 - Rotate your key: `stair rl key rotate`.
 - Stop recording: uninstall the plugin (`claude plugin uninstall stair@stair-ai`), or delete `~/.stair/config.json`. Records already uploaded stay in your account.
 - Ask for your account and its records to be deleted: write to colin@stair-ai.com with the `agent_id` that `stair rl status` prints (an anonymous account has nothing else to name it by). In this alpha there is no self-service deletion.
-- Hear from the makers: at the start of a session the plugin may show one line, a new version or a changed notice, taken from a public file it checks hourly. A changed privacy notice pauses recording until you accept the new one; nothing leaves this machine in the meantime.
+- Hear from the makers: at the start of a session the plugin may show one line, a new version or a changed notice, taken from a public file it checks hourly. Its words are shown to you; Claude is told only that there is a new version or a changed notice, never the file's text. A changed privacy notice pauses recording until you accept the new one; nothing leaves this machine in the meantime.
 
 ## What is not there yet
 

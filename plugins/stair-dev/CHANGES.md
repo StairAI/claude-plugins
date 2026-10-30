@@ -2,6 +2,17 @@
 
 What each version of the Stair plugin for Claude Code changes for the person using it, newest first. When a newer version is out, the plugin says so at the start of a session together with the entries between your version and the new one, and Claude tells you more when you ask. A line that starts with "You do:" is something you have to do; it is said first.
 
+## 0.11.2
+
+Notices no longer speak to Claude, fingerprints can no longer be guessed, and the privacy notice says how things work today.
+
+- Privacy: the fingerprints that let records be matched without carrying text (the prompt that opened a turn, a task handed to another session, a file write, a thinking block) are computed with a key derived from yours, so nobody can test guesses against them.
+- Privacy: the words of the makers' notices are shown to you only. Claude is told only that there is a new version or a changed notice, and reads a new version's notes when you ask what it changes.
+- Privacy: the privacy notice is now version 2026-10-30. It describes the two changes above, says that the name you give this machine is readable on the ledger, and says plainly how the viewer works today. Recording pauses until you accept it.
+- You do: after updating, accept the new privacy notice; Claude reads it to you and asks.
+- A notice left by the version you updated from is no longer shown after the update.
+- Uploads wait longer for a slow ledger and go in smaller batches, so they no longer time out.
+
 ## 0.11.1
 
 Updating is one step now: the plugin, the `stair` command and the plugin's Python environment move to the new version together.
