@@ -27,10 +27,10 @@ Claude installs the plugin, reads its code and says what it does, explains the p
 
    Claude then reads the plugin's code and tells you what it does and where it sends data, explains the privacy notice ([`PRIVACY.md`](./PRIVACY.md)) in your language, asks whether you accept it, and only then runs the setup below with your e-mail, a name for this machine and your invite code. Nothing is registered or sent before you say yes.
 
-   By hand, the same thing: read `PRIVACY.md`, then run setup with the notice's version in `--accept-privacy-notice` (without it, setup prints the notice and stops). The launcher is `bin/stair` inside the installed copy, `~/.claude/plugins/cache/stair-ai/stair/<version>/`; link it somewhere on your PATH so the commands below read as written:
+   By hand, the same thing: read `PRIVACY.md`, then run setup with the notice's version in `--accept-privacy-notice` (without it, setup prints the notice and stops). The launcher is `bin/stair` inside the installed copy, `~/.claude/plugins/cache/stair-ai/stair/<version>/`; its `link` command puts `stair` on your PATH (`~/.local/bin/stair`, a small script that runs whichever version Claude Code has installed), so the commands below read as written:
 
    ```bash
-   ln -sf "$HOME/.claude/plugins/cache/stair-ai/stair/$(ls ~/.claude/plugins/cache/stair-ai/stair | sort -V | tail -1)/bin/stair" ~/.local/bin/stair
+   "$HOME/.claude/plugins/cache/stair-ai/stair/$(ls ~/.claude/plugins/cache/stair-ai/stair | sort -V | tail -1)/bin/stair" link
    stair rl setup --agent-name "my-laptop" --invite STAIR-XXXXX-XXXXX --accept-privacy-notice 2026-10-29
    ```
 

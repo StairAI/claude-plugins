@@ -1,7 +1,49 @@
 {
-  "_about": "What the plugin's makers want people to know. The plugin fetches this file at most hourly and says what applies at the start of the next session; the person decides. latest_version is filled by publish.sh for the channel it publishes: stair on main, stair-dev on staging; each channel reads its own branch's copy. A notice: {id, kind: update|privacy|info, title, text, until?: YYYY-MM-DD, channel?: release|dev, privacy_notice_version?: for kind privacy}.",
+  "_about": "What the plugin's makers want people to know. The plugin fetches this file at most hourly and says what applies at the start of the next session; the person decides. latest_version and changes (from claude-code/CHANGES.md) are filled by publish.sh for the channel it publishes: stair on main, stair-dev on staging; each channel reads its own branch's copy. A notice: {id, kind: update|privacy|info, title, text, until?: YYYY-MM-DD, channel?: release|dev, privacy_notice_version?: for kind privacy}.",
   "latest_version": {
-    "stair-dev": "0.11.0"
+    "stair-dev": "0.11.1"
   },
-  "notices": []
+  "notices": [
+    {
+      "id": "changes:0.11.1",
+      "kind": "changes",
+      "title": "What's new in stair-dev 0.11.1",
+      "text": "Updating is one step now: the plugin, the `stair` command and the plugin's Python environment move to the new version together. Details: https://github.com/StairAI/claude-plugins/blob/staging/plugins/stair-dev/CHANGES.md"
+    }
+  ],
+  "changes": [
+    {
+      "version": "0.11.1",
+      "summary": "Updating is one step now: the plugin, the `stair` command and the plugin's Python environment move to the new version together.",
+      "you_do": [],
+      "items": [
+        "The `stair` command runs whichever version Claude Code has installed, so it no longer stays on an old one after an update. A command set up by an earlier version is switched over at the start of your next session.",
+        "When a version needs a newer ledger SDK, the plugin builds a fresh Python environment for it in the background, once, and removes the old one.",
+        "On macOS, recording now reaches the ledger: before, the upload after each turn did not start there, and the queued events could not be read. What waited on the machine is uploaded after your next turn.",
+        "The update notice says what changed, and Claude can tell you more when you ask."
+      ]
+    },
+    {
+      "version": "0.11.0",
+      "summary": "Each turn records who started it: you, another session, a background task or a notice from the app. Sessions started from other sessions, forks and sub-agents are linked to where they came from.",
+      "you_do": [],
+      "items": [
+        "A conversation forked in the app no longer uploads again the history it copied from the original."
+      ]
+    },
+    {
+      "version": "0.10.1",
+      "summary": "The update notice refreshes the marketplace first, so the update finds the new version.",
+      "you_do": [],
+      "items": []
+    },
+    {
+      "version": "0.10.0",
+      "summary": "Accounts can be anonymous: no e-mail is needed to start, and `stair rl claim you@example.com` adds one later.",
+      "you_do": [],
+      "items": [
+        "At the start of a session the plugin tells you when a new version or a changed privacy notice is out."
+      ]
+    }
+  ]
 }
