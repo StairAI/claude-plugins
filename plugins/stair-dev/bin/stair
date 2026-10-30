@@ -125,7 +125,17 @@ if [ "${1:-}" = "hook" ]; then
       rp="$PY"; [ -n "$rp" ] || rp="$(command -v python3.12 || command -v python3.11 || true)"   # from what was last fetched
       [ -n "$rp" ] && "$rp" -P "$ROOT/rl_plugin.py" notices --rebuild >/dev/null 2>&1          # (no network)
     fi
-    if [ -f "$HOME_DIR/notice.pending.json" ]; then cat "$HOME_DIR/notice.pending.json"; mv -f "$HOME_DIR/notice.pending.json" "$HOME_DIR/notice.shown.json" 2>/dev/null; fi   # what the makers left, once
+    if [ -f "$HOME_DIR/notice.pending.json" ]; then cat "$HOME_DIR/notice.pending.json"; mv -f "$HOME_DIR/notice.pending.json" "$HOME_DIR/notice.shown.json" 2>/dev/null; exit 0; fi   # what the makers left, once
+    # Nothing left to say, yet this plugin's own privacy notice is newer than the one accepted (after an update from a
+    # version that never fetched notices, say): recording is paused, so say so now, from the two version numbers alone,
+    # without the network or Python.
+    accepted="$(tr -d '\n' < "$HOME_DIR/config.json" 2>/dev/null | sed -n 's/.*"privacy_notice": *{[^}]*"version": *"\([^"]*\)".*/\1/p')"
+    notice="$(sed -n 's/^PRIVACY_NOTICE_VERSION = "\([0-9][0-9.-]*\)".*/\1/p' "$ROOT/rl_plugin.py" | head -n 1)"
+    if [ -n "$notice" ] && [[ "$accepted" < "$notice" ]]; then
+      where="$(printf '%s' "$ROOT/PRIVACY.md" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+      printf '{"systemMessage": "Stair: the privacy notice changed (%s); recording is paused until you accept it.", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "Stair plugin (%s): the privacy notice changed to version %s, and uploads are paused until the person accepts it. Read %s to them in their language, ask for consent, and only with a clear yes run `%s rl accept-notice %s`."}}\n' \
+        "$notice" "$NAME" "$notice" "$where" "$NAME" "$notice"
+    fi
     exit 0
   fi
   mkdir -p "$HOME_DIR/queue" "$HOME_DIR/logs" 2>/dev/null || exit 0   # the processor's log must have a directory, or the spawn below fails silently

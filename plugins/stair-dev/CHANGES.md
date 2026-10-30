@@ -2,6 +2,13 @@
 
 What each version of the Stair plugin for Claude Code changes for the person using it, newest first. When a newer version is out, the plugin says so at the start of a session together with the entries between your version and the new one, and Claude tells you more when you ask. A line that starts with "You do:" is something you have to do; it is said first.
 
+## 0.12.3
+
+The first session after an update says when recording is paused for a privacy notice, even on a machine that never fetched one.
+
+- Privacy: when the plugin's own privacy notice is newer than the one you accepted, recording pauses, and every session says so from its first turn until you accept it, without the network.
+- `stair rl flush` sends nothing while recording is paused, and when the ledger cannot be reached it keeps everything to retry; `stair rl status` counts it.
+
 ## 0.12.2
 
 Several sessions open at once no longer lose or repeat each other's records.

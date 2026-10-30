@@ -429,7 +429,7 @@ def setup(args):
 
 def status(args):
     cfg = load_config(); q = sum(1 for _ in open(QUEUE, encoding="utf-8")) if QUEUE.exists() else 0
-    sp = sum(1 for _ in open(HOME / "spool.jsonl", encoding="utf-8")) if (HOME / "spool.jsonl").exists() else 0
+    sp = sum(sum(1 for _ in open(HOME / f, encoding="utf-8")) for f in ("spool.jsonl", "spool.flushing.jsonl") if (HOME / f).exists())
     invalid = sum(1 for _ in open(HOME / "spool.invalid.jsonl", encoding="utf-8")) if (HOME / "spool.invalid.jsonl").exists() else 0
     q += sum(sum(1 for _ in open(t, encoding="utf-8")) for t in QUEUE.parent.glob("events.*.taken")) if QUEUE.parent.exists() else 0
     states = list((HOME / "state").glob("*.json")) if (HOME / "state").exists() else []
@@ -462,16 +462,27 @@ def status(args):
     return 0
 
 def flush(args):
-    """Retry the spool. What the ledger's rules rule out goes aside to spool.invalid.jsonl instead of being retried forever."""
-    cfg = load_config(); p = HOME / "spool.jsonl"
-    if not cfg or not p.exists(): print(json.dumps({"ok": True, "flushed": 0})); return 0
+    """Retry the spool. What the ledger's rules rule out goes aside to spool.invalid.jsonl instead of being retried forever.
+    Paused for a privacy notice, nothing is sent; if the ledger cannot be reached, everything stays to retry later."""
+    cfg = load_config(); p = HOME / "spool.jsonl"; flushing = p.with_name("spool.flushing.jsonl")
+    if not cfg or not (p.exists() or flushing.exists()): print(json.dumps({"ok": True, "flushed": 0})); return 0
+    paused = uploads_paused(cfg, fetch_notices(cfg, offline=True))
+    if paused:
+        print(json.dumps({"ok": False, "error": "recording is paused until privacy notice %s is accepted" % paused.get("privacy_notice_version")})); return 1
     lock = hold_lock()
     if lock is None: print(json.dumps({"ok": False, "error": "a processor is at work; try again in a moment"})); return 1
     try:
-        items = [json.loads(l) for l in open(p, encoding="utf-8") if l.strip()]
-        os.replace(p, p.with_name("spool.flushing.jsonl"))
-        ok, failed = upload(cfg, [x["record"] for x in items])
-        spool(failed); p.with_name("spool.flushing.jsonl").unlink()
+        if p.exists():   # what a stopped flush left stays in spool.flushing.jsonl and is taken with the rest
+            with open(flushing, "a", encoding="utf-8") as f: f.write(open(p, encoding="utf-8").read())
+            p.unlink()
+        items = [json.loads(l) for l in open(flushing, encoding="utf-8") if l.strip()]
+        try:
+            ok, failed = upload(cfg, [x["record"] for x in items])
+        except Exception as e:
+            with open(p, "a", encoding="utf-8") as f: f.write(open(flushing, encoding="utf-8").read())
+            flushing.unlink()
+            print(json.dumps({"ok": False, "error": "could not upload: %s" % str(e)[:200], "left": len(items)})); return 1
+        spool(failed); flushing.unlink()
     finally:
         lock.close()
     aside = [x for x in failed if lasting(x.get("error"))]
@@ -690,7 +701,7 @@ def mark_shown():
 def pending_notices(cfg, cache):
     """Which notices apply to this install and were not shown yet: an update when the published version is newer, a
     privacy notice newer than the one accepted (uploads pause until it is), and plain messages."""
-    if not cache: return []
+    cache = cache or {}
     seen = set(cache.get("seen") or []); out = []
     latest = str((cache.get("latest_version") or {}).get(NAME) or "")
     installed = plugin_version()
@@ -712,11 +723,16 @@ def pending_notices(cfg, cache):
         if n.get("channel") and n["channel"] != CHANNEL["STAIR_CHANNEL"]: continue
         if n.get("kind") == "privacy" and n.get("privacy_notice_version") and str(n["privacy_notice_version"]) <= accepted: continue
         out.append(n)
+    local = PRIVACY_NOTICE_VERSION   # the installed plugin's own notice, when nothing published says so
+    if accepted < local and not any(n.get("kind") == "privacy" for n in out):
+        out.append({"id": "privacy-" + local, "kind": "privacy", "privacy_notice_version": local})
     return [n for n in out if n["id"] not in seen]
 
 def uploads_paused(cfg, cache):
-    """Uploads stop when the makers published a privacy notice newer than the one this person accepted."""
+    """Uploads stop when this plugin's own privacy notice, or one the makers published, is newer than the one accepted."""
     accepted = ((cfg or {}).get("privacy_notice") or {}).get("version") or ""
+    if accepted < PRIVACY_NOTICE_VERSION:   # the installed notice changed: no upload until it is accepted
+        return {"id": "privacy-" + PRIVACY_NOTICE_VERSION, "kind": "privacy", "privacy_notice_version": PRIVACY_NOTICE_VERSION}
     for n in (cache or {}).get("notices") or []:
         v = str(n.get("privacy_notice_version") or "") if isinstance(n, dict) else ""
         if n.get("kind") == "privacy" and NOTICE_VERSION_RE.fullmatch(v) and v > accepted: return n
