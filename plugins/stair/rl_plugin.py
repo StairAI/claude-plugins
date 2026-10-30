@@ -471,7 +471,12 @@ def render_pending(pending, paused):
         kind = n.get("kind"); title = n.get("title") or n.get("id"); text = n.get("text") or ""
         if kind == "update":
             lines.append("Stair: " + title + ". Say \"update stair\" to update.")
-            ctx.append("Update available: %s. If they want it, run `claude plugin update %s@%s` and then suggest /reload-plugins." % (title, NAME, "stair-ai-dev" if NAME == "stair-dev" else "stair-ai"))
+            mkt = "stair-ai-dev" if NAME == "stair-dev" else "stair-ai"
+            # `claude plugin update` alone compares against the local copy of the marketplace, which is only refreshed by
+            # `claude plugin marketplace update`; without it the update reports the installed version as the latest.
+            ctx.append("Update available: %s. If they want it, run `claude plugin marketplace update %s && claude plugin update %s@%s` "
+                       "(both, in this order: the first fetches the marketplace), then tell them the new version applies to sessions "
+                       "started after the update." % (title, mkt, NAME, mkt))
         elif kind == "privacy":
             lines.append("Stair: the privacy notice changed (%s); recording is paused until you accept it." % n.get("privacy_notice_version"))
             ctx.append("Privacy notice changed to version %s: %s Uploads are paused until accepted. Update the plugin if the installed PRIVACY.md is older, read PRIVACY.md to the person in their language, ask for consent, and only with a clear yes run `%s rl accept-notice %s`." % (n.get("privacy_notice_version"), text, NAME, n.get("privacy_notice_version")))

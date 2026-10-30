@@ -1,6 +1,6 @@
 {
   "name": "stair",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Stair for Claude Code: keeps a record of your sessions in a Reasoning Ledger you own (tool calls, questions and answers, decisions, outcomes; schema 0.5), encrypted on your machine with a key only you hold. Hooks mark the moments; a background processor maps the transcript and uploads in batches. Nothing is asked of the model.",
   "author": {
     "name": "Stair AI"
