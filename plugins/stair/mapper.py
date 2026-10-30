@@ -3,25 +3,40 @@
 
 Reads a Claude Code transcript (JSONL) and returns one record per behavior, by rule:
 
-  user prompt (text)                 -> Observing (human_trigger); upstream = the Acting of the turn it continues
+  a message that opens a turn       -> Observing; who sent it comes from the line's origin, never from the model:
+    the person                       -> human_trigger
+    another session (the brief of a session it started, a cross-session message, a sub-agent's report)
+                                     -> agent_trigger, sources naming the sender; a "link:<digest>" tag pairs it with the
+                                        sender's Delegating (same digest of the brief or message on both sides)
+    a background task that finished  -> outcome_trigger, sources pointing at the call that started it
+    a notice from the app            -> signal_trigger
+    upstream = the Acting of the turn it continues
+  "[Request interrupted by user]"    -> Attesting(gate_kind=interrupt, cancel) in the turn it stops; not a turn
   thinking block                     -> Thinking (model_invocation from the message); the text stays on the machine, the record carries its hash and size (thinking_text="hash", the default)
   mid-turn assistant text            -> Thinking / Reflecting when a sentence states a decision or a verdict (rule, confidence 0.5),
                                         else Other(assistant.narration, proposed_behavior=Reporting)
   final assistant text               -> Acting (answer.final); a text that ends by asking the user -> Escalating(question)
   tool_use + tool_result             -> ToolCalling (call_id, duration, outcome, effect; file writes carry a pointer, not content)
-    Agent / Task / SendMessage       -> Delegating
+    Agent / Task / SendMessage       -> Delegating (a sub-agent's id from the call's result names its sessions)
+    start_session / hand_off_to_session / send_message (sessions of the Claude app) -> Delegating(spawn | handoff | message),
+                                        the started session as child_session_id "claude-code-app://local_…"
     AskUserQuestion                  -> Escalating(question) + Attesting from the answer
     Write/Edit to memory, CLAUDE.md, skills, settings -> Memorizing (target = pointer + change hash)
     TodoWrite / plan tools           -> Planning (goal, steps)
     a reply that lays out a numbered plan (the word "plan" + 2+ numbered items) -> Planning (confidence 0.6)
     verify-like Bash                 -> an extra Reflecting(kind=evaluation, concurrent)
   permission events (from hooks)     -> Escalating(permission) + Attesting(approve | reject | no_response)
-  compaction line                    -> Other(context.compaction)
+  compaction line, or a continuation summary written as a message -> Other(context.compaction)
   rewind (a prompt whose parent is an earlier turn) -> tag rewound_to:t<k> + Attesting(gate_kind=rewind, reject)
   fork (first prompt's parent is not in this file) -> tag forked_from + sources pointing at that record id
+  fork made by the app (the file starts with the parent's lines, under the parent's sessionId) -> that copied history is
+    walked but not emitted (it happened in the parent session); the first own turn is tagged fork_of:<parent session>
+    and points at the parent's turn through sources, never upstream (the parent's records may live under another agent)
 
-Record ids derive from message / tool_use ids, so a copied history (fork) or a re-run maps to the same ids and the server's
-(agent_id, record_id) dedup keeps one copy. Nothing here touches the network.
+Record ids derive from message / tool_use ids, so a copied history (fork, continuation) or a re-run maps to the same ids
+and the server's (agent_id, record_id) dedup keeps one copy. Links across sessions travel in sources and tags, never in
+upstream_record_id: the server checks that an upstream record exists under the same agent, and sessions upload in any
+order. Nothing here touches the network.
 """
 from __future__ import annotations
 import hashlib, json, os, re, uuid, hashlib, datetime
@@ -41,6 +56,26 @@ ERR_TYPES = [("permission.denied", re.compile(r"doesn't want to proceed|user dec
              ("file.not_found", re.compile(r"ENOENT|No such file|does not exist|not found", re.I)),
              ("tool.timeout", re.compile(r"timed? ?out", re.I)), ("tool.invalid_input", re.compile(r"InputValidationError|invalid|must be", re.I)),
              ("shell.error", re.compile(r"exit code|command failed|Error:", re.I))]
+REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+CROSS_SESSION = re.compile(r'^<cross-session-message from="([^"]+)"[^>]*>\n?(.*?)(?:</cross-session-message>)?\s*$', re.S)
+APP_SESSION = re.compile(r"\blocal_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
+TASK_NOTE = re.compile(r"<task-notification>.*?<tool-use-id>([A-Za-z0-9_]+)</tool-use-id>", re.S)
+AGENT_ID = re.compile(r"\bagentId:?\s*([0-9a-f]{8,})")
+SESSION_REPORT = re.compile(r"finished a turn|\breported\b|you started|The user's fork|forked this conversation", re.I)
+INTERRUPTED = re.compile(r"^\[Request interrupted by user[^\]]*\]$")
+CONTINUED = "This session is being continued from a previous conversation"
+BRIEF_HEAD, BRIEF_TASK = "Background (from the session that started this one):", "\n\nTask:\n"
+SESSION_TOOLS = ("__start_session", "__hand_off_to_session")
+TRIGGER_WORDS = {"human_trigger": "user prompt", "agent_trigger": "message from another session or agent",
+                 "outcome_trigger": "a background task finished", "signal_trigger": "notice from the app"}
+
+def norm_text(s):
+    """Text as both ends of a hand-over see it: the app writes @ as a full-width ＠ when it passes text between sessions."""
+    return (s or "").replace("\uff20", "@").replace("\r\n", "\n").strip()
+
+def link_key(s):
+    """The tag that pairs a Delegating with the turn it started in the other session: a digest of the brief or message."""
+    return "link:" + hashlib.sha256(norm_text(s).encode("utf-8")).hexdigest()[:16]
 
 def rid(*parts): return str(uuid.uuid5(NS, "stair-ai.com/stair-rl/" + "/".join(str(p) for p in parts)))
 def sha(obj):
@@ -115,8 +150,9 @@ class Mapper:
         return {k: v for k, v in mi.items() if v is not None}
 
     # ---- the main pass
-    def map_transcript(self, path, conv_id, permission_events=None, subagent_events=None, child_prefix=None):
-        """Returns (records, info). conv_id prefixes every session id; child_prefix marks a sub-agent transcript."""
+    def map_transcript(self, path, conv_id, permission_events=None, subagent_events=None, child_prefix=None, parent_ref=None):
+        """Returns (records, info). conv_id prefixes every session id; child_prefix marks a sub-agent transcript, whose
+        first prompt came from the Delegating record parent_ref (when the caller knows it)."""
         lines = []
         for line in open(path, encoding="utf-8"):
             try: lines.append(json.loads(line))
@@ -131,6 +167,46 @@ class Mapper:
         turn_first_ts = {}
         in_file = {d.get("uuid") for d in lines if d.get("uuid")}
         info = {"turns": 0, "rewinds": 0, "forks": 0, "compactions": 0}
+        # A fork made by the app starts with the parent's lines, still under the parent's sessionId. The file's own session
+        # is the one its last lines carry; the copied history before it is walked (for turn numbers and links) but not
+        # emitted: it happened in the parent session and was recorded there, under the same record ids.
+        own_sid = None if child_prefix else next((d.get("sessionId") for d in reversed(lines) if d.get("sessionId")), None)
+        first_sid = next((d.get("sessionId") for d in lines if d.get("sessionId")), None)
+        fork_of = first_sid if own_sid and first_sid and first_sid != own_sid else None
+        own_from = next((i for i, d in enumerate(lines) if d.get("sessionId") == own_sid), 0) if fork_of else 0
+        emitted_from = 0               # where this session's own records start in `out`
+        own_turns = 0                  # turns opened in this session's own lines
+        agent_spawn = {}               # sub-agent id -> the Delegating that started it (from the Agent call's result)
+        session_spawn = {}             # app session id -> the Delegating that started it (from start_session's result)
+        def classify(d, text, first):
+            """Who sent the message that opens a turn, from the line itself: (trigger_type, trigger_source, executor, sources, tags)."""
+            o = d.get("origin") if isinstance(d.get("origin"), dict) else {}
+            kind = str(o.get("kind") or d.get("turnOrigin") or "")
+            body = REMINDER.sub("", text).strip()
+            if child_prefix and first:   # a sub-agent's first prompt is the brief its parent wrote
+                return ("agent_trigger", "claude-code://subagent_prompt", "ai", [{"kind": "record", "ref": parent_ref}] if parent_ref else [], [])
+            if kind in ("task-notification", "task_notification") or body.startswith("<task-notification>"):
+                m = TASK_NOTE.search(body)
+                return ("outcome_trigger", "claude-code://task_notification", "det", [{"kind": "record", "ref": rid(self.agent_id, m.group(1), "tool")}] if m else [], [])
+            if kind == "peer":
+                frm = str(o.get("from") or o.get("senderTaskId") or "")[:64]
+                src = ([{"kind": "agent", "ref": frm}] if frm else []) + ([{"kind": "record", "ref": agent_spawn[frm]}] if frm in agent_spawn else [])
+                return ("agent_trigger", "claude-code://agent_message", "ai", src, [])
+            m = CROSS_SESSION.match(body)
+            if m:
+                k = link_key(m.group(2))
+                return ("agent_trigger", "claude-code://session_message", "ai", [{"kind": "session", "ref": m.group(1)[:64]}, {"kind": "delegation", "ref": k}], [k])
+            if kind == "sdk" and first and body and not body.startswith("<"):   # the brief of a session another session started
+                task = body.split(BRIEF_TASK, 1)[1] if body.startswith(BRIEF_HEAD) and BRIEF_TASK in body else body
+                k = link_key(task)
+                return ("agent_trigger", "claude-code://session_start", "ai", [{"kind": "delegation", "ref": k}], [k])
+            if kind == "sdk" or not body:   # written by the app, not typed by the person
+                ids = list(dict.fromkeys(APP_SESSION.findall(text)))
+                if ids and SESSION_REPORT.search(text):
+                    src = [{"kind": "session", "ref": i} for i in ids[:4]] + [{"kind": "record", "ref": session_spawn[i]} for i in ids[:4] if i in session_spawn]
+                    return ("agent_trigger", "claude-code://session_report", "ai", src, [])
+                return ("signal_trigger", "claude-code://app_notice", "det", [], [])
+            return ("human_trigger", "claude-code://user_prompt", "human", [{"kind": "human", "ref": "user", "sha256": sha(text)}], [])
         def narration_or_claim(text, ts, u, i, mi):
             steps = plan_steps(text)
             if steps:   # the reply laid out a numbered plan before acting on it
@@ -174,8 +250,11 @@ class Mapper:
                 out.append(q)
                 if turn not in acting_of_turn: acting_of_turn[turn] = q["record_id"]
             last_text = None
-        for d in lines:
+        for li, d in enumerate(lines):
             t = d.get("type"); m = d.get("message") or {}; ts = ts_ms(d.get("timestamp")); u = d.get("uuid")
+            in_prefix = bool(fork_of) and li < own_from
+            if fork_of and li == own_from:
+                flush_text(); emitted_from = len(out)   # everything before this was the parent's
             if u: turn_of_uuid[u] = turn
             if t == "user" and d.get("isCompactSummary"):
                 if sid:
@@ -219,6 +298,20 @@ class Mapper:
                     elif kind == "delegate":
                         rec["result"] = content if content is not None else ""; rec["outcome"] = "failure" if err else "success"
                         if err: rec["error_type"] = error_type(ctext)
+                        tname = tu.get("name") or ""
+                        # the result's own text (a list of blocks is joined, not serialized: escaped newlines would hide the ids)
+                        ptext = content if isinstance(content, str) else "\n".join(b.get("text", "") for b in content if isinstance(b, dict)) if isinstance(content, list) else ""
+                        if tname.endswith(SESSION_TOOLS) and not err:   # the app answers with the started session's id
+                            ids = APP_SESSION.findall(ptext)
+                            if ids and re.search(r"\b(Started|Handed|started|handed)\b", ptext):
+                                rec["child_session_id"] = "claude-code-app://" + ids[0]; session_spawn[ids[0]] = rec["record_id"]
+                            elif re.search(r"Do it here", ptext): rec["outcome"] = "cancelled"
+                            elif re.search(r"\b(No |not |cannot|can't|failed|refused|error)", ptext): rec["outcome"] = "failure"; rec["error_type"] = error_type(ptext)
+                            else: rec["outcome"] = "escalated"   # proposed to the person, not started
+                        elif tname in ("Agent", "Task") and not err:
+                            a = AGENT_ID.search(ptext)
+                            if a:
+                                agent_spawn[a.group(1)[:64]] = rec["record_id"]; rec["child_session_id"] = "%s:sub:%s" % (conv_id, a.group(1)[:8])
                     elif kind in ("memorize", "plan"):
                         rec["outcome"] = "failure" if err else "success"
                         if err: rec["error_type"] = error_type(ctext)
@@ -233,12 +326,35 @@ class Mapper:
                             att["upstream_record_id"] = [rec["record_id"]]; out.append(att)
                             prev.append(att["record_id"])
                     prev.append(rec["record_id"])
+                body = REMINDER.sub("", text or "").strip()
+                if text and not results and not d.get("isMeta") and INTERRUPTED.match(body):   # the person stopped the turn
+                    if sid:
+                        flush_text()
+                        att = self.base(sid, "Attesting", ts, "human", "concurrent", conf=0.9, tags=tags_turn, operator_id="user", gate_kind="interrupt", disposition="cancel",
+                                        reason="the person stopped the turn", outcome="cancelled", channel="interactive", record_id=rid(self.agent_id, u, "interrupt"))
+                        if prev: att["upstream_record_id"] = prev[-1:]
+                        out.append(att); prev.append(att["record_id"])
+                    continue
+                if text and not results and body.startswith(CONTINUED):   # a continuation summary written as a message
+                    if sid:
+                        r = self.base(sid, "Other", ts, "det", "post_execution", tags=tags_turn, label="context.compaction", data={"chars": len(text)}, record_id=rid(self.agent_id, u, "compact"))
+                        if prev: r["upstream_record_id"] = prev[-1:]
+                        out.append(r); prev.append(r["record_id"]); info["compactions"] += 1
+                    continue
                 if text is not None and text.strip() and not results and not d.get("isMeta"):
-                    flush_text(); turn += 1; info["turns"] += 1
+                    flush_text(); turn += 1
+                    first_own = not in_prefix and own_turns == 0
+                    if in_prefix: info["copied_turns"] = info.get("copied_turns", 0) + 1
+                    else: info["turns"] += 1; own_turns += 1
                     sid = "%s:t%03d" % (conv_id, turn) if not child_prefix else "%s:t%03d" % (child_prefix, turn)
                     prev = []; tags_turn = ["conv:" + conv_id]; turn_first_ts[turn] = ts
-                    parent = d.get("parentUuid"); upstream = None; sources = [{"kind": "human", "ref": "user", "sha256": sha(text)}]
-                    if parent and parent in turn_of_uuid and turn_of_uuid[parent] and turn_of_uuid[parent] != turn - 1 and acting_of_turn.get(turn_of_uuid[parent]):
+                    parent = d.get("parentUuid"); upstream = None
+                    trig, trig_src, trig_ex, sources, link_tags = classify(d, text, first_own)
+                    if fork_of and first_own:   # the first turn after the parent's copied history: a fork of that turn
+                        tags_turn.append("fork_of:" + fork_of); info["forks"] += 1
+                        if parent and parent in turn_of_uuid and acting_of_turn.get(turn_of_uuid[parent]):
+                            sources.append({"kind": "record", "ref": acting_of_turn[turn_of_uuid[parent]]})
+                    elif parent and parent in turn_of_uuid and turn_of_uuid[parent] and turn_of_uuid[parent] != turn - 1 and acting_of_turn.get(turn_of_uuid[parent]):
                         k = turn_of_uuid[parent]; tags_turn.append("rewound_to:t%03d" % k); info["rewinds"] += 1
                         upstream = [acting_of_turn[k]]
                         att = self.base(sid, "Attesting", ts, "human", "concurrent", conf=0.8, tags=tags_turn, operator_id="user", gate_kind="rewind", disposition="reject",
@@ -250,9 +366,9 @@ class Mapper:
                     elif parent and parent not in in_file and turn == 1:
                         tags_turn.append("forked_from:" + rid(self.agent_id, parent, "final")[:8]); info["forks"] += 1
                         sources.append({"kind": "record", "ref": rid(self.agent_id, parent, "final")})
-                    r = self.base(sid, "Observing", ts, "human", "pre_execution", tags=tags_turn, trigger_source="claude-code://user_prompt", trigger_type="human_trigger",
-                                  trigger_description="user prompt, %d chars" % len(text), trigger_payload_summary="%d chars" % len(text), trigger_payload=text, sources=sources,
-                                  record_id=rid(self.agent_id, u, "obs"))
+                    r = self.base(sid, "Observing", ts, trig_ex, "pre_execution", tags=tags_turn + link_tags, trigger_source=trig_src, trigger_type=trig,
+                                  trigger_description="%s, %d chars" % (TRIGGER_WORDS[trig], len(text)), trigger_payload_summary="%d chars" % len(text), trigger_payload=text,
+                                  sources=sources or None, record_id=rid(self.agent_id, u, "obs"))
                     if upstream: r["upstream_record_id"] = upstream
                     out.append(r); prev.append(r["record_id"])
                 continue
@@ -303,9 +419,18 @@ class Mapper:
                     if name in ("Agent", "Task"):
                         rec = self.base(sid, "Delegating", ts, "ai", "post_execution", kind="spawn", goal=inp.get("prompt") or inp, delegate_agent_id=str(inp.get("subagent_type") or "general-purpose"),
                                         awaited=True, model_invocation=mi, record_id=rid(self.agent_id, tid, "tool"), **common); kind = "delegate"
-                    elif name == "SendMessage":
-                        rec = self.base(sid, "Delegating", ts, "ai", "post_execution", kind="message", goal=inp.get("message") or inp, delegate_agent_id=str(inp.get("to") or "session")[:40],
-                                        awaited=False, record_id=rid(self.agent_id, tid, "tool"), **common); kind = "delegate"
+                    elif name.endswith(SESSION_TOOLS):   # a session of the Claude app, started or handed over
+                        handoff = name.endswith("__hand_off_to_session")
+                        task = inp.get("remaining_plan") if handoff else inp.get("prompt")
+                        goal = ({"background": inp["background"], "task": task} if inp.get("background") else task) if task else inp
+                        rec = self.base(sid, "Delegating", ts, "ai", "post_execution", kind="handoff" if handoff else "spawn", goal=goal, delegate_agent_id="claude-code-session",
+                                        awaited=False, model_invocation=mi, record_id=rid(self.agent_id, tid, "tool"),
+                                        tags=tags_turn + ([link_key(task)] if isinstance(task, str) and task.strip() else [])); kind = "delegate"
+                    elif name == "SendMessage" or name.endswith("__send_message"):
+                        msg = inp.get("message") or inp.get("content")
+                        rec = self.base(sid, "Delegating", ts, "ai", "post_execution", kind="message", goal=msg or inp,
+                                        delegate_agent_id=str(inp.get("to") or inp.get("session_id") or "session")[:40], awaited=False, record_id=rid(self.agent_id, tid, "tool"),
+                                        tags=tags_turn + ([link_key(msg)] if isinstance(msg, str) and msg.strip() else [])); kind = "delegate"
                     elif name == "AskUserQuestion":
                         qs = inp.get("questions") or []; opts = [o.get("label") for q in qs for o in (q.get("options") or []) if isinstance(o, dict) and o.get("label")]
                         rec = self.base(sid, "Escalating", ts, "ai", "pre_execution", kind="question", asked=qs, record_id=rid(self.agent_id, tid, "tool"), **common); kind = "ask"
@@ -337,7 +462,7 @@ class Mapper:
                         rec["upstream_record_id"] = [call["record_id"]]; out.append(rec); prev.append(rec["record_id"]); continue
                     if up: rec["upstream_record_id"] = up
                     out.append(rec)
-                    tool_use[tid] = {"rec": rec, "kind": kind, "ts": ts, "inp": inp, "perm": perm,
+                    tool_use[tid] = {"rec": rec, "kind": kind, "ts": ts, "inp": inp, "perm": perm, "name": name,
                                      "verify": name == "Bash" and bool(VERIFY.search(str(inp.get("command") or ""))),
                                      "options": [o for o in (opts if name == "AskUserQuestion" else [])]}
         flush_text()
@@ -356,7 +481,7 @@ class Mapper:
             att = self.base(sid, "Attesting", pe.get("ts"), "human", "concurrent", conf=0.6, tags=tags_turn, operator_id="user", gate_kind="permission", disposition="no_response",
                             outcome="timeout", channel="headless", reason="no disposition observed", record_id=rid(self.agent_id, pe.get("tool_use_id") or ("%s/%s" % (pe.get("tool_name"), pe.get("ts"))), "perm-att"))
             att["upstream_record_id"] = [esc["record_id"]]; out.extend([esc, att])
-        return out, info
+        return out[emitted_from:], info
 
 def strip_none(v):
     if isinstance(v, dict): return {k: strip_none(x) for k, x in v.items() if x is not None}

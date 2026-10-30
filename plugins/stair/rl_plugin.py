@@ -158,20 +158,23 @@ def process_transcript(cfg, transcript, payload, st, dry=False):
     conv = payload.get("session_id") or Path(transcript).stem
     mp = Mapper(cfg["agent_id"], cfg.get("device") or device_info(), thinking_text=cfg.get("thinking_text", "hash"))
     records, info = mp.map_transcript(transcript, conv, permission_events=[dict(p) for p in st.get("permissions", [])])
-    children = []
-    for sa in sorted(st.get("subagents", []), key=lambda x: x.get("ts") or 0):   # sub-agent transcripts: their own sessions under the same conversation
+    # Sub-agent transcripts: their own sessions under the same conversation. The Agent call's result names the
+    # sub-agent's id, so the mapper already set child_session_id on its Delegating; a call whose result did not is
+    # matched by order (the n-th unmatched spawn answers the n-th sub-agent that stopped without a match).
+    spawned = {r["child_session_id"]: r["record_id"] for r in records if r.get("behavior") == "Delegating" and r.get("child_session_id")}
+    unmatched = [r for r in records if r.get("behavior") == "Delegating" and r.get("kind") == "spawn" and not r.get("child_session_id")
+                 and r.get("delegate_agent_id") != "claude-code-session"]
+    for sa in sorted(st.get("subagents", []), key=lambda x: x.get("ts") or 0):
         atp = sa.get("agent_transcript_path"); prefix = "%s:sub:%s" % (conv, str(sa.get("agent_id") or "x")[:8])
-        children.append(prefix)
+        parent_ref = spawned.get(prefix)
+        if not parent_ref and unmatched:
+            rec = unmatched.pop(0); rec["child_session_id"] = prefix; parent_ref = rec["record_id"]
         if atp and os.path.exists(atp):
             try:
-                child, _ = mp.map_transcript(atp, conv, child_prefix=prefix)
+                child, _ = mp.map_transcript(atp, conv, child_prefix=prefix, parent_ref=parent_ref)
                 records.extend(child)
             except Exception as e:
                 log("subagent-map", e)
-    # the n-th sub-agent that stopped answers the n-th spawn: the Delegating record names the child's sessions
-    spawns = [r for r in records if r.get("behavior") == "Delegating" and r.get("kind") == "spawn" and not r.get("child_session_id")]
-    for rec, prefix in zip(spawns, children):
-        rec["child_session_id"] = prefix
     records = [strip_none(r) for r in records]
     done = set(st.get("uploaded", [])); new = [r for r in records if r["record_id"] not in done]
     if dry: return records, new, info
