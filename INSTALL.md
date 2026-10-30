@@ -11,11 +11,11 @@ claude plugin marketplace add StairAI/claude-plugins
 claude plugin install stair@stair-ai
 ```
 
-If the marketplace was added before, the first command says so; that is fine. If `uv` is missing and there is no Python 3.12 or newer on the machine, offer to install uv (`curl -LsSf https://astral.sh/uv/install.sh | sh`); the plugin builds its own Python environment with it.
+If the marketplace was added before, the first command says so; then run `claude plugin marketplace update stair-ai`, which fetches the newest version. If the plugin was installed before, the second command says so; then run `claude plugin update stair@stair-ai` after the marketplace update (on its own it compares against the old copy and finds nothing newer). If `uv` is missing and there is no Python 3.12 or newer on the machine, offer to install uv (`curl -LsSf https://astral.sh/uv/install.sh | sh`); the plugin builds its own Python environment with it.
 
 ## 2. Follow the plugin's own install command
 
-The plugin is now at the newest directory under `~/.claude/plugins/cache/stair-ai/stair/` (for example `~/.claude/plugins/cache/stair-ai/stair/0.8.0/`). Read `commands/install.md` in that directory and follow it exactly. It has you:
+The plugin is now at the newest directory under `~/.claude/plugins/cache/stair-ai/stair/` (`~/.claude/plugins/cache/stair-ai/stair/<version>/`, the highest version there). Read `commands/install.md` in that directory and follow it exactly. It has you:
 
 1. read the plugin's code (`bin/stair`, `hooks/hooks.json`, `rl_plugin.py`, `mapper.py`) and tell the person what it does, what it reads, and where it sends data;
 2. explain the privacy notice (`PRIVACY.md`) in the person's language, with its full meaning;
