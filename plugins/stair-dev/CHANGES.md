@@ -2,6 +2,13 @@
 
 What each version of the Stair plugin for Claude Code changes for the person using it, newest first. When a newer version is out, the plugin says so at the start of a session together with the entries between your version and the new one, and Claude tells you more when you ask. A line that starts with "You do:" is something you have to do; it is said first.
 
+## 0.13.0
+
+Your account can now reach other Stair services, the first being the team's page sharing at share.stair-ai.com.
+
+- `stair access token --resource <address>` gives a skill a short-lived token for that one service. Your keys stay on this machine and go only to the Stair gate; the service never sees them.
+- `stair access me` shows your handle and the services your account may reach. Who may use which service is set by the Stair operator.
+
 ## 0.12.4
 
 A long upload, such as the first after an update, no longer leaves failed pieces for you to retry by hand.

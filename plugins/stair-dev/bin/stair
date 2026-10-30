@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # stair: the launcher of the Stair plugin for Claude Code.
 #   stair rl <command>   the ledger: setup, status, viewer, flush, map, process, key, admin (the `rl` word may be left out)
-#   stair access …       identity and keys: not yet; for now the owner key and the content master key live under $STAIR_HOME
+#   stair access …       the account and the services it reaches: token (a short-lived token for one Stair service, for a
+#                        skill's script), me, admin (handles and grants). Plain python3 is enough: no SDK needed.
 #   stair hook <Event>   fast path, bash only: append the hook's JSON to the local queue; on Stop/SessionEnd start the
 #                        detached processor (which maps the transcript and uploads). Never blocks Claude Code for long.
 #   stair env            build the plugin's own Python environment with the ledger SDK in it (one per SDK version).
@@ -159,7 +160,12 @@ if [ "${1:-}" = "hook" ]; then
   exit 0
 fi
 if [ "${1:-}" = "env" ]; then build_env; exit $?; fi
-if [ "${1:-}" = "access" ]; then echo "$NAME access: not yet. The owner key is $HOME_DIR/owner.key and the content master key is $HOME_DIR/master.key; back both up." >&2; exit 2; fi
+if [ "${1:-}" = "access" ]; then
+  shift
+  APY="$PY"; [ -n "$APY" ] || APY="$(command -v python3.12 || command -v python3 || true)"
+  [ -n "$APY" ] || { echo "stair: no python3 found" >&2; exit 1; }
+  exec "$APY" -P "$ROOT/access.py" "$@"
+fi
 if [ "${1:-}" = "rl" ]; then shift; fi
 if [ -z "$PY" ] || ! "$PY" -c 'import reasoning_ledger' >/dev/null 2>&1; then
   build_env || { echo "stair: the ledger SDK is not available (see above); \"$NAME env\" tries again" >&2; exit 1; }
