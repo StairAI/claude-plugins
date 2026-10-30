@@ -47,7 +47,7 @@ QUEUE = HOME / "queue" / "events.jsonl"
 BATCH = 25   # records per upload; with the longer read timeout below, a slow ledger no longer times a batch out
 # The privacy notice (PRIVACY.md beside this file) a person accepts at setup. Bumped whenever the notice changes in
 # substance; setup then asks again.
-PRIVACY_NOTICE_VERSION = "2026-10-30"
+PRIVACY_NOTICE_VERSION = "2026-10-30.1"
 
 def plugin_version():
     try: return json.load(open(HERE / ".claude-plugin" / "plugin.json", encoding="utf-8")).get("version") or "0"
@@ -422,29 +422,141 @@ def mint_ticket(cfg, next_path=None):
     with urllib.request.urlopen(req, timeout=15) as res:
         return json.loads(res.read().decode("utf-8"))
 
+GRANT_DAYS, GRANT_HOURS = 7, 1
+
+def how_to_show():
+    """Where a viewer link that carries a key may go: opened in this machine's browser ("open"), printed in a person's
+    own terminal ("print"), or nowhere (None): run by an assistant's tool, it would put the key in the model's context."""
+    import shutil
+    remote = bool(os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"))
+    if not remote and sys.platform == "darwin" and shutil.which("open"): return "open"
+    if not remote and sys.platform.startswith("linux") and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) and shutil.which("xdg-open"):
+        return "open"
+    if sys.stdout.isatty() and sys.stdin.isatty(): return "print"
+    return None
+
+def open_in_browser(url):
+    import subprocess
+    try:
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+        return True
+    except Exception as e:
+        log("viewer-open", e); return False
+
+def grant_keys(cfg, days):
+    """This machine's data keys of the last `days` days, newest first (at most 5000), unwrapped here with the master key."""
+    import base64
+    from reasoning_ledger import load_master_key, master_key_id
+    from reasoning_ledger.encryption import open_sealed
+    mk = load_master_key(master_key_path(cfg)); mid = master_key_id(mk); since = now_ms() - int(days * 86400 * 1000)
+    found, after = [], None
+    while True:
+        page = owner_request(cfg, "GET", "/v1/content-keys?limit=1000&agent_id=%s%s" % (cfg["agent_id"], "&after=" + after if after else ""))
+        for k in page.get("keys") or []:
+            if k.get("master_key_id") == mid and (k.get("created_at") or 0) >= since:
+                found.append((k["created_at"], k["key_id"], open_sealed(mk, base64.b64decode(k["wrapped_key"]), k["key_id"])))
+        after = page.get("next_after")
+        if not after: break
+    found.sort(key=lambda f: f[0], reverse=True)
+    return [(kid, dek) for _, kid, dek in found[:5000]]
+
+def record_grant(cfg, answer, days, hours):
+    """The grant, as a record in the owner's ledger: the person authorized a view of these sessions until then."""
+    rec = {"schema_version": "0.5", "agent_id": cfg["agent_id"], "session_id": "stair:grants", "record_id": str(uuid.uuid4()),
+           "behavior": "Attesting", "client_ts_utc": now_ms(), "executor": "human", "record_phase": "post_execution",
+           "operator_id": "user", "gate_kind": "grant", "disposition": "approve", "outcome": "success", "channel": "interactive",
+           "decision": {"purpose": "view", "sessions": answer.get("sessions"), "days": days, "hours": hours, "expires_at": answer.get("expires_at")},
+           "written_by": {"component": "stair", "credential": "owner_api_key"}, "tags": ["grant:%s" % answer.get("grant_id")],
+           "classification": {"source": "instrumented", "mapper": "stair@0.12", "confidence": 1.0}}
+    try:
+        _, failed = upload(cfg, [rec])
+        if failed: log("grant-record", failed[0]["error"])
+    except Exception as e:
+        log("grant-record", e)
+
+def make_view_grant(cfg, days, hours):
+    """Grant a view: the keys of the last `days` days, wrapped again here under a fresh grant key, registered for `hours`
+    hours, and the grant recorded. Returns (the ledger's answer, the grant key as a link fragment); the answer is None when
+    the ledger cannot take grants (before 2.1.0), the fragment None when there is nothing to show."""
+    import base64
+    from reasoning_ledger import master_key_fragment, master_key_id
+    from reasoning_ledger.encryption import seal
+    keys = grant_keys(cfg, days)
+    if not keys: return {"sessions": 0}, None
+    g = os.urandom(32); gid = master_key_id(g)
+    body = {"purpose": "view", "expires_in": int(hours * 3600),
+            "keys": [{"key_id": kid, "master_key_id": gid, "wrap_alg": "A256GCM", "wrapped_key": base64.b64encode(seal(g, dek, kid)).decode()} for kid, dek in keys]}
+    answer = owner_request(cfg, "POST", "/v1/view-grants", body, missing_ok=True)
+    if answer is None: return None, None
+    record_grant(cfg, answer, days, hours)
+    return answer, master_key_fragment(g)
+
+def ticket_link(cfg, base, args):
+    """A one-time sign-in link without any key: the structure of the records; their content too on a ledger that keeps it
+    in the clear."""
+    t = mint_ticket(cfg, args.next)
+    url = base + t["ticket_url"]; secs = max(0, int((t["expires_at"] - now_ms()) / 1000))
+    if args.json: print(json.dumps({"ok": True, "url": url, "expires_in_s": secs, "one_time": True, "decrypts": False}))
+    else: print(url); print(f"one-time link, valid for {secs} s")
+    return 0
+
 def viewer(args):
-    """Print a one-time link that signs the browser into the viewer. The link is built from the viewer's public address
-    (`viewer_url` in config.json, or --base; the upload endpoint otherwise) and the ticket the server issued."""
+    """`viewer`: your records in the browser, decrypted there, by way of a view grant: a time-limited, revocable
+    authorization for the sessions of the last --days days (7), lasting --hours hours (1). The master key never leaves this
+    machine: the keys of those sessions are wrapped again here under a fresh grant key, which only the link carries (after
+    #, never sent to the server), and the grant is recorded in the ledger. The link is opened in this machine's browser, or
+    printed when this runs in a person's own terminal; never printed for an assistant. --no-key: the structure only."""
     cfg = load_config()
     if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
     if args.base and args.save:
         cfg["viewer_url"] = args.base.rstrip("/"); json.dump(cfg, open(HOME / "config.json", "w", encoding="utf-8"), indent=1)
     base = (args.base or cfg.get("viewer_url") or cfg["endpoint"]).rstrip("/")
-    t = mint_ticket(cfg, args.next)
-    url = base + t["ticket_url"]; secs = max(0, int((t["expires_at"] - now_ms()) / 1000))
-    # The content master key rides in the fragment: the browser keeps it for the tab and never sends it, and the
-    # viewer decrypts with it. The ticket is still what signs the browser in.
-    carries_key = False
-    if master_key_path(cfg) and not getattr(args, "no_key", False):
-        from reasoning_ledger import load_master_key, master_key_fragment
-        url += "#k=" + master_key_fragment(load_master_key(master_key_path(cfg))); carries_key = True
-    if args.json: print(json.dumps({"ok": True, "url": url, "expires_in_s": secs, "one_time": True, "decrypts": carries_key}))
+    if not master_key_path(cfg) or getattr(args, "no_key", False): return ticket_link(cfg, base, args)
+    how = how_to_show()
+    if how is None:
+        print(json.dumps({"ok": False, "error": "run `%s rl viewer` in a terminal of your own: its link carries a key, and an assistant is "
+                                                 "not shown keys (`%s rl viewer --no-key` here shows the structure without the content)" % (NAME, NAME)}))
+        return 2
+    answer, fragment = make_view_grant(cfg, args.days, args.hours)
+    if answer is None:
+        print("stair: this ledger cannot take view grants yet (it needs 2.1.0): the structure only, without the content", file=sys.stderr)
+        return ticket_link(cfg, base, args)
+    if not fragment:
+        print(json.dumps({"ok": True, "sessions": 0, "note": "nothing recorded on this machine in the last %s days" % args.days})); return 0
+    url = base + answer["grant_url"] + "#k=" + fragment
+    summary = {"ok": True, "grant_id": answer["grant_id"], "sessions": answer["sessions"], "expires_at": answer["expires_at"],
+               "revoke": "%s rl revoke %s" % (NAME, answer["grant_id"])}
+    if how == "open":
+        if open_in_browser(url):
+            print(json.dumps({**summary, "opened": "in this machine's browser"})); return 0
+        if not (sys.stdout.isatty() and sys.stdin.isatty()):   # no browser, and not a person's terminal: the key goes nowhere
+            print(json.dumps({**summary, "ok": False, "error": "could not open a browser; run `%s rl viewer` in a terminal of your own" % NAME})); return 1
+    if args.json: print(json.dumps({**summary, "url": url}))
     else:
-        print(url); print(f"one-time link, valid for {secs} s" + ("; it carries your content key, so share the link with nobody" if carries_key else ""))
+        until = time.strftime("%H:%M", time.localtime(answer["expires_at"] / 1000))
+        print(url)
+        print("opens %d sessions of the last %s days until %s; the link carries a key, so share it with nobody (`%s rl revoke %s` ends it now)"
+              % (answer["sessions"], args.days, until, NAME, answer["grant_id"]))
     return 0
 
-def owner_request(cfg, method, path, body=None):
-    """A request to the ledger as this owner, outside the SDK (the few owner-account calls)."""
+def grants_cmd(args):
+    """`grants`: the view grants of this account, newest first, without keys."""
+    cfg = load_config()
+    if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
+    r = owner_request(cfg, "GET", "/v1/view-grants", missing_ok=True)
+    print(json.dumps({"ok": r is not None, "grants": (r or {}).get("grants", []), **({} if r is not None else {"error": "this ledger has no view grants yet"})}))
+    return 0 if r is not None else 1
+
+def revoke_cmd(args):
+    """`revoke GRANT_ID`: end a view grant now; the ledger drops its keys and signs out the browsers it opened."""
+    cfg = load_config()
+    if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
+    r = owner_request(cfg, "DELETE", "/v1/view-grants/" + args.grant_id)
+    print(json.dumps({"ok": bool(r.get("revoked")), "grant_id": args.grant_id})); return 0
+
+def owner_request(cfg, method, path, body=None, missing_ok=False):
+    """A request to the ledger as this owner, outside the SDK (the few owner-account calls). missing_ok: None on a 404."""
     import urllib.request, urllib.error
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(cfg["endpoint"].rstrip("/") + path, data=data, method=method,
@@ -452,6 +564,7 @@ def owner_request(cfg, method, path, body=None):
     try:
         with urllib.request.urlopen(req, timeout=20) as res: return json.loads(res.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
+        if missing_ok and e.code == 404: return None
         detail = e.read().decode("utf-8", "replace")[:300]
         try: detail = json.loads(detail).get("message") or detail
         except Exception: pass
@@ -697,6 +810,8 @@ def main():
     s.add_argument("--viewer-url", default=None, help="the viewer's public address when it differs from the endpoint (e.g. an HTTPS proxy)")
     sub.add_parser("status"); sub.add_parser("flush")
     v = sub.add_parser("viewer"); v.add_argument("--next", default=None, help="path to open after signing in"); v.add_argument("--base", default=None, help="viewer address to put in front of the ticket")
+    v.add_argument("--days", type=float, default=GRANT_DAYS, help="grant a view of the sessions of the last DAYS days (default %(default)s)"); v.add_argument("--hours", type=float, default=GRANT_HOURS, help="for HOURS hours, at most 24 (default %(default)s)")
+    sub.add_parser("grants", help="your view grants, newest first"); rv = sub.add_parser("revoke", help="end a view grant now"); rv.add_argument("grant_id")
     v.add_argument("--save", action="store_true", help="remember --base as viewer_url in config.json"); v.add_argument("--json", action="store_true")
     v.add_argument("--no-key", action="store_true", help="leave the content master key out of the link (encrypted content then stays encrypted in the viewer)")
     m = sub.add_parser("map"); m.add_argument("transcript"); m.add_argument("--conv", default=None); m.add_argument("--dump", default=None)
@@ -715,7 +830,7 @@ def main():
     ad.add_argument("what", nargs="?", default="invites", help=argparse.SUPPRESS)
     a = ap.parse_args()
     fn = {"process": process, "setup": setup, "status": status, "flush": flush, "map": map_cmd, "viewer": viewer, "key": key_cmd, "admin": admin_cmd,
-          "claim": claim, "notices": notices_cmd, "accept-notice": accept_notice}.get(a.cmd)
+          "claim": claim, "notices": notices_cmd, "accept-notice": accept_notice, "grants": grants_cmd, "revoke": revoke_cmd}.get(a.cmd)
     if fn is None: ap.print_help(); return 1
     return fn(a)
 

@@ -2,6 +2,16 @@
 
 What each version of the Stair plugin for Claude Code changes for the person using it, newest first. When a newer version is out, the plugin says so at the start of a session together with the entries between your version and the new one, and Claude tells you more when you ask. A line that starts with "You do:" is something you have to do; it is said first.
 
+## 0.12.0
+
+The viewer works by grants: each view is a limited, recorded authorization, and your master key stays on your machine.
+
+- Privacy: `stair rl viewer` no longer puts your master key in the link. It grants a view of your sessions of the last seven days for an hour (`--days`, `--hours`): their keys are wrapped again here under a fresh key that only the link carries, and the grant is recorded in your ledger. When it ends, the ledger drops those keys and the link opens nothing.
+- Privacy: Claude is never shown the link's key. The plugin opens the link in your browser, or prints it only in a terminal of your own; when Claude Code runs on another machine, run `stair rl viewer` in a terminal there.
+- Privacy: the privacy notice is now version 2026-10-30.1, describing the viewer as it now works. Recording pauses until you accept it.
+- You do: after updating, accept the privacy notice; Claude reads it to you and asks.
+- `stair rl grants` lists your grants; `stair rl revoke <grant>` ends one now.
+
 ## 0.11.2
 
 Notices no longer speak to Claude, fingerprints can no longer be guessed, and the privacy notice says how things work today.

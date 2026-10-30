@@ -13,12 +13,12 @@ This plugin's name is the `name` in `.claude-plugin/plugin.json` there: `stair`,
 
 2. **Explain the privacy notice.** Read `PRIVACY.md` in the plugin directory and relay it in the person's own language, with its full meaning, not a one-line summary: what is recorded, what the ledger can and cannot see, where it is stored and who runs it, what they can do (view, rotate the key, stop, ask for deletion), what is not there yet (no sharing, no backup command, alpha). Say that tool names and the shape of the work stay readable on the ledger, so a machine that works on something they must not share should not have the plugin.
 
-3. **Ask for consent explicitly.** Ask one question: do they accept the notice (version `2026-10-30`) and want recording to start with their next session? Use AskUserQuestion when it is available; otherwise ask in the message and wait. Without a clear yes, stop; nothing is installed further and nothing has been sent.
+3. **Ask for consent explicitly.** Ask one question: do they accept the notice (version `2026-10-30.1`) and want recording to start with their next session? Use AskUserQuestion when it is available; otherwise ask in the message and wait. Without a clear yes, stop; nothing is installed further and nothing has been sent.
 
 4. **Set up.** Ask for a short name for this machine (such as "work-laptop"), saying that it is stored as it is and readable on the ledger, so it should say nothing they would not want there, and the invite code if it was not given as the argument (`$ARGUMENTS`). No e-mail is needed: the account is anonymous and its keys are its identity; they can add an e-mail later with `stair rl claim you@example.com` so the account can be found again. Check the plugin's version again: if it is not the one you reviewed (Claude Code can update a plugin in the meantime), read what changed, its `CHANGES.md` and the files above, and tell them before going on. Then run, with the real values:
 
    ```
-   "${CLAUDE_PLUGIN_ROOT}/bin/stair" rl setup --agent-name NAME --invite CODE --accept-privacy-notice 2026-10-30
+   "${CLAUDE_PLUGIN_ROOT}/bin/stair" rl setup --agent-name NAME --invite CODE --accept-privacy-notice 2026-10-30.1
    ```
 
    The ledger it writes to is this channel's default (`channel.env` in the plugin directory: the hosted ledger `api.stair-ai.com` for `stair`, the staging ledger for `stair-dev`); `--endpoint` overrides it. It builds the plugin's Python environment (needs `uv` or Python 3.12+; `curl -LsSf https://astral.sh/uv/install.sh | sh` installs uv), creates the account, makes the keys, registers this machine and sends one probe record. Show the person the JSON line it prints. If it fails, show the error and stop; do not retry with other values on your own.

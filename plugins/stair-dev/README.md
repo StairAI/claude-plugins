@@ -31,7 +31,7 @@ Claude installs the plugin, reads its code and says what it does, explains the p
 
    ```bash
    "$HOME/.claude/plugins/cache/stair-ai/stair/$(ls ~/.claude/plugins/cache/stair-ai/stair | sort -V | tail -1)/bin/stair" link
-   stair rl setup --agent-name "my-laptop" --invite STAIR-XXXXX-XXXXX --accept-privacy-notice 2026-10-30
+   stair rl setup --agent-name "my-laptop" --invite STAIR-XXXXX-XXXXX --accept-privacy-notice 2026-10-30.1
    ```
 
    The setup builds the plugin's own Python environment (with `uv`, or Python 3.12+), creates your owner on the ledger with your invite code (anonymous: the keys are the identity; `--register you@example.com` registers with an e-mail instead, and `stair rl claim you@example.com` attaches one later), makes your content master key, registers this machine as an agent and sends one probe record (which carries the notice version you accepted). Two files come out of it, both readable by you only and never printed or sent:
@@ -47,12 +47,13 @@ Claude installs the plugin, reads its code and says what it does, explains the p
 
 ## Looking at your ledger
 
-`stair rl viewer` prints a one-time link to the trace viewer, valid for ten minutes: one row per turn, and a graph of each turn's records with the text decrypted in your browser. The link carries your content master key after `#`, which the browser keeps to itself and never sends to the server; share the link with nobody (`--no-key` leaves the key out, and the content then stays encrypted on the page). When the viewer is reached at another address than the upload endpoint, pass it once with `stair rl viewer --base https://… --save` (or `--viewer-url` at setup).
+`stair rl viewer` opens the trace viewer by way of a view grant: your sessions of the last seven days (`--days`), for an hour (`--hours`), as one row per conversation and a graph of each turn's records, with the text decrypted in your browser. The plugin unwraps those sessions' data keys here with your master key, wraps them again under a fresh grant key and registers the grant with the ledger (2.1.0 or later), which keeps the re-wrapped keys until the grant ends and then drops them; the link carries the grant key after `#`, which the browser never sends, and the grant is recorded in your ledger. The master key never leaves the machine. The link is opened in this machine's browser, or printed only in a terminal of your own: run by Claude on a machine without a browser, the command says so and prints no key. `--no-key` gives a one-time link to the structure, without any key. When the viewer is reached at another address than the upload endpoint, pass it once with `stair rl viewer --base https://… --save` (or `--viewer-url` at setup).
 
 | Command | What it does |
 |---|---|
 | `stair rl status` | Where this machine writes, how much it has uploaded, what is queued or spooled, whether encryption is on |
-| `stair rl viewer [--next /traces/…] [--no-key]` | A one-time sign-in link (see above) |
+| `stair rl viewer [--days 7] [--hours 1] [--no-key]` | Open a view grant in the browser (see above) |
+| `stair rl grants` / `stair rl revoke <grant>` | Your view grants; end one now (the ledger drops its keys and signs its browsers out) |
 | `stair rl flush` | Retry the records the server rejected or that waited for an upstream |
 | `stair rl map <transcript.jsonl>` | Dry run: map a transcript to records without uploading |
 | `stair rl claim you@example.com` | Attach an e-mail to this anonymous account (409 if another account has it) |

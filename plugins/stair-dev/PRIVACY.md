@@ -1,6 +1,6 @@
 # What Stair records, and who can see it
 
-Notice version `2026-10-30`. Setup asks you to accept this version; the plugin records that you did.
+Notice version `2026-10-30.1`. Setup asks you to accept this version; the plugin records that you did.
 
 ## What is recorded
 
@@ -32,7 +32,7 @@ Nobody, unless you say so. The account is anonymous: two keys made on this machi
 
 ## What you can do
 
-- Look at your own records, decrypted in your browser: `stair rl viewer`. The page comes from the ledger's server and decrypts with your key, which the link carries after `#`: the browser does not send it to the server, but keeps it in its history, and whoever runs the server could change the page. Open it in your own browser only. A version in which each view is a limited, recorded authorization is being built.
+- Look at your own records, decrypted in your browser: `stair rl viewer`. Each time, it grants a view: it takes your sessions of the last seven days, wraps their keys again on this machine under a fresh key that only the link carries (after `#`, which the browser does not send), and records the grant in your ledger. The page comes from the ledger's server; while the grant lasts, an hour, it can read those sessions and only those, then the server drops their keys and the link opens nothing. Your master key never leaves this machine, and Claude is never shown the link's key: the plugin opens the link in your browser, or prints it only in a terminal of your own. `stair rl grants` lists your grants; `stair rl revoke` ends one at once.
 - Rotate your key: `stair rl key rotate`.
 - Stop recording: uninstall the plugin (`claude plugin uninstall stair@stair-ai`), or delete `~/.stair/config.json`. Records already uploaded stay in your account.
 - Ask for your account and its records to be deleted: write to colin@stair-ai.com with the `agent_id` that `stair rl status` prints (an anonymous account has nothing else to name it by). In this alpha there is no self-service deletion.

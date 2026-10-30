@@ -1,6 +1,6 @@
 {
   "name": "stair-dev",
-  "version": "0.11.2",
+  "version": "0.12.0",
   "description": "Stair for Claude Code, staging channel: the next version of stair, recording your sessions to the staging ledger (SDK from the ledger's develop branch) so the team can try it before it is released. Installs side by side with stair.",
   "author": {
     "name": "Stair AI"
