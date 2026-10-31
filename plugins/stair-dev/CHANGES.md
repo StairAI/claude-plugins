@@ -2,6 +2,15 @@
 
 What each version of the Stair plugin for Claude Code changes for the person using it, newest first. When a newer version is out, the plugin says so at the start of a session together with the entries between your version and the new one, and Claude tells you more when you ask. A line that starts with "You do:" is something you have to do; it is said first.
 
+## 0.14.0
+
+Installing Stair again gets your account back: the same records, no invite code, from the keys on this machine or the ones you kept.
+
+- An uninstall leaves your keys in `~/.stair`, and setup now reconnects that account by itself, keeping this machine's earlier name; `/stair:install` checks for them first.
+- Keys you kept elsewhere come back with `stair rl setup --restore <folder>`, the folder that holds `owner.key` and `master.key`. Claude asks where the folder is, never for the keys.
+- Before writing anything, setup checks with the ledger that your keys are the right ones: when the master key here cannot open your earlier sessions, it stops and says so instead of quietly making a new one.
+- A key is never deleted: one that is replaced is moved aside as `<name>.replaced-<time>`.
+
 ## 0.13.1
 
 `stair access` now says plainly when your ledger does not run the Stair gate yet, where before it stopped with an error trace.

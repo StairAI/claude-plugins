@@ -39,6 +39,8 @@ Claude installs the plugin, reads its code and says what it does, explains the p
    - `~/.stair/owner.key`, the key that writes to your account;
    - `~/.stair/master.key`, the key that encrypts your content. **Back this one up** (copy it somewhere safe): without it, nobody can read the content, you included.
 
+   Installed again after an uninstall, which leaves `~/.stair` as it is, setup reconnects the same account by itself: no invite code, the machine's earlier name, the same records. Keys kept elsewhere come back with `--restore <folder>` (the folder holding `owner.key` and `master.key`, or a copy of `~/.stair`). Before writing anything, setup checks with the ledger that it accepts the owner key and that the master key opens this machine's sessions there, and stops when it does not (`--new-master-key` starts a new key, the earlier sessions then staying unreadable). A different key already here is moved aside as `<name>.replaced-<time>` with `--force`, never deleted.
+
    The invite code is kept in `~/.stair/config.json`, so a later setup on this machine does not ask for it again. With an owner key you were given instead of `--register`: `--api-key-file <file>`. On a self-hosted ledger that does not allow self-service, put its registration token in `STAIR_REGISTRATION_TOKEN` (or `--registration-token-file`); `--plaintext` turns encryption off there, if its operator wants readable content. Where the SDK should come from is `STAIR_SDK_SPEC` (a pip requirement; default: the ledger repository's `develop` branch).
 
 3. Start a new session (or `/reload-plugins`). From the next turn on, every turn of every session is recorded.
@@ -51,7 +53,8 @@ Claude installs the plugin, reads its code and says what it does, explains the p
 
 | Command | What it does |
 |---|---|
-| `stair rl status` | Where this machine writes, how much it has uploaded, what is queued or spooled, whether encryption is on |
+| `stair rl status` | Where this machine writes, under which name, how much it has uploaded, what is queued or spooled, whether encryption is on, whether the keys are here |
+| `stair rl setup --restore <folder>` | Reconnect the account whose keys you kept (no invite code); see Install |
 | `stair rl viewer [--days 7] [--hours 1] [--no-key]` | Open a view grant in the browser (see above) |
 | `stair rl grants` / `stair rl revoke <grant>` | Your view grants; end one now (the ledger drops its keys and signs its browsers out) |
 | `stair rl flush` | Retry the records the server rejected or that waited for an upstream |
@@ -115,7 +118,7 @@ The same source builds two plugins that can be installed side by side. `stair`, 
 
 ## Limits of this version
 
-- The master key is one file on one machine. Back it up yourself; `stair access backup` is for a later version. A second machine of yours is a second agent with its own key (the ledger can hold several), not a copy of this one.
+- The master key is one file on one machine. Back it up yourself (copy `owner.key` and `master.key`); `setup --restore` puts them back, on this machine or another. A second machine joins the same account with `--restore` and a new `--agent-name`: with both keys it shares this master key, with `owner.key` alone it makes its own.
 - Sharing a session with someone else, or letting an evaluator read it, means wrapping that session's key for them. The ledger has the place for it; the commands do not exist yet.
 - The whole transcript is re-mapped on every turn; long transcripts will want offset-based incremental mapping.
 - Plan tools (TodoWrite and the plan-mode tools) are written as a `ToolCalling` (the items, encrypted) plus a `Planning` whose `steps` carry only each item's length.

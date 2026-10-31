@@ -13,6 +13,7 @@ Commands: process (drain the queue), setup, status, flush (retry the spool), map
 
 Content is encrypted on this machine before upload (the SDK's ContentEncryption): setup makes a master key, kept in master.key and never sent; the ledger holds ciphertext and wrapped per-session keys. The viewer link carries the master key in its fragment, which the browser keeps to itself.
 State under $STAIR_HOME (default ~/.stair): config.json, owner.key, master.key, queue/events.jsonl, state/<transcript>.json, spool.jsonl, logs/.
+An uninstall leaves it; setup then reconnects the same account. Keys kept elsewhere come back with `setup --restore FOLDER`.
 """
 from __future__ import annotations
 import json, os, re, sys, time, uuid, hashlib, hmac, argparse, socket, getpass, collections
@@ -363,6 +364,28 @@ def save_key(path, key):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f: f.write(key.strip() + "\n")
 
+def set_aside(path):
+    """A key about to be replaced moves to <name>.replaced-<ms>; it is never deleted: an account's key, once lost, is lost."""
+    if path.exists(): os.replace(path, path.with_name(path.name + ".replaced-%d" % now_ms()))
+
+def copy_key(src, dst):
+    """A kept key copied into place, readable by this user only. Its bytes go from file to file: never printed or sent."""
+    data = src.read_bytes()
+    fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f: f.write(data)
+
+def kept_keys(src):
+    """Where `setup --restore PATH` finds the keys a person kept: PATH is the folder holding owner.key and master.key (a copy
+    of their state directory, say) or one of those two files. Returns (owner key file, master key file or None, the copy's
+    config.json or {})."""
+    p = Path(os.path.expanduser(src))
+    folder = p if p.is_dir() else p.parent
+    if not (folder / "owner.key").is_file():
+        raise SystemExit("stair: there is no owner.key in %s; --restore takes the folder where you kept owner.key and master.key" % folder)
+    try: old = json.load(open(folder / "config.json", encoding="utf-8"))
+    except Exception: old = {}
+    return folder / "owner.key", (folder / "master.key" if (folder / "master.key").is_file() else None), old
+
 def ensure_master_key(path):
     """The content master key: made once, kept in a file only this user can read, never printed or sent. Returns its id."""
     from reasoning_ledger import generate_master_key, load_master_key, master_key_id, save_master_key
@@ -385,46 +408,106 @@ def require_privacy_consent(args):
     raise SystemExit(2)
 
 def setup(args):
+    """Connect this machine to an account: a new one (an invite code), the one whose keys are already in $STAIR_HOME (set up
+    again, or installed again after an uninstall, which leaves them), or the one whose keys the person kept (--restore FOLDER).
+    An earlier account is checked with the ledger before anything is written: its owner key must be accepted, and when the
+    ledger holds sessions of this machine, the master key here must be the one that opens them, or setup stops and says so
+    (--new-master-key starts a new key instead, leaving those sessions unreadable). No key is ever printed, sent or deleted."""
     require_privacy_consent(args)
     HOME.mkdir(parents=True, exist_ok=True)
     previous = load_config() or {}
+    endpoint = args.endpoint.rstrip("/")
     invite = getattr(args, "invite", None) or os.environ.get("STAIR_INVITE_CODE") or previous.get("invite_code")
-    key_path = HOME / "owner.key"; email = (getattr(args, "register", None) or "").strip() or None
-    if getattr(args, "register", None) is None and args.api_key_file:
-        pass                                       # a key the person was given
-    elif getattr(args, "register", None) is not None or not key_path.exists():
+    key_path, master_path = HOME / "owner.key", HOME / "master.key"
+    register = getattr(args, "register", None); email = (register or "").strip() or None
+    force, fresh, plaintext = getattr(args, "force", False), getattr(args, "new_master_key", False), getattr(args, "plaintext", False)
+    owner_src, master_src, kept = None, None, {}
+    if getattr(args, "restore", None):
+        if register is not None: raise SystemExit("stair: --restore reconnects the account your keys belong to; leave out --register")
+        owner_src, master_src, kept = kept_keys(args.restore)
+        same = lambda a, b: b.exists() and a.resolve() == b.resolve()
+        if same(owner_src, key_path): owner_src = None              # the keys are where they belong already
+        if master_src and same(master_src, master_path): master_src = None
+        if fresh: master_src = None                                 # a new master key: the kept one is not used
+        for src, dst in ((owner_src, key_path), (master_src, master_path)):
+            if src and dst.exists() and dst.read_bytes() != src.read_bytes() and not force:
+                raise SystemExit("stair: %s holds another key than the one in %s; nothing was changed. Run setup again with --force to "
+                                 "use the kept one: the key here is then moved to %s.replaced-<time>, not deleted" % (dst, src.parent, dst.name))
+    if owner_src:
+        account, key_file = "restored", owner_src
+    elif register is None and args.api_key_file:
+        account, key_file = "existing", Path(os.path.expanduser(args.api_key_file))   # a key the person was given
+    elif register is not None or not key_path.exists():
         # Register: anonymously unless an e-mail is given (--register you@example.com). The keys are the identity; an
         # e-mail can be claimed later with `stair rl claim`.
         token = os.environ.get("STAIR_REGISTRATION_TOKEN") or os.environ.get("RL_REGISTRATION_TOKEN") or (open(os.path.expanduser(args.registration_token_file), encoding="utf-8").read().strip() if args.registration_token_file else None)
-        if key_path.exists() and not args.force:
+        if key_path.exists() and not force:
             raise SystemExit("stair: %s exists; leave out --register to keep using it, --api-key-file %s to say so, or --force to replace it" % (key_path, key_path))
-        save_key(key_path, register_owner(args.endpoint, email, token, invite)); args.api_key_file = str(key_path)
+        new_key = register_owner(endpoint, email, token, invite)
+        set_aside(key_path); save_key(key_path, new_key)
+        account, key_file = "new", key_path
     else:
-        args.api_key_file = str(key_path)          # set up again on a machine that already has its owner key
-    cfg = {"endpoint": args.endpoint.rstrip("/"), "api_key_file": args.api_key_file, "agent_name": args.agent_name, "device": device_info(),
+        account, key_file = "existing", key_path                   # set up again, or installed again: the keys stayed here
+    name = getattr(args, "agent_name", None) or kept.get("agent_name") or previous.get("agent_name")
+    cfg = {"endpoint": endpoint, "api_key_file": str(key_path if account == "restored" else key_file), "agent_name": name, "device": device_info(),
            "privacy_notice": {"version": PRIVACY_NOTICE_VERSION, "accepted_at": now_ms()}}
     if getattr(args, "sdk_src", None): cfg["sdk_src"] = args.sdk_src   # a development checkout of the SDK, only when asked for
-    if email: cfg["owner_email"] = email
-    elif previous.get("owner_email"): cfg["owner_email"] = previous["owner_email"]
+    use_sdk_src(cfg)
+    from reasoning_ledger import LedgerClient, RegisterAgentOpts, ResolveAgentOpts, load_master_key, master_key_id
+    ask = {"endpoint": endpoint, "api_key_file": str(key_file)}       # the account as the ledger knows it, before anything is copied
+    owner, held = {}, []
+    if account != "new":
+        owner = owner_request(ask, "GET", "/v1/owners/me", refused="the ledger at %s does not accept the owner key in %s: the key belongs to another "
+                              "ledger (stair writes to api.stair-ai.com, stair-dev to stg-api.stair-ai.com) or it was replaced. Nothing was changed." % (endpoint, key_file)) or {}
+        if not name:
+            machines = account_machines(ask)
+            if len(machines) != 1:
+                raise SystemExit("stair: %s; name this machine with --agent-name: an earlier name continues that machine's records, a new name adds "
+                                 "a machine to the account" % ("this account has sessions from %d machines: %s" % (len(machines), ", ".join(m["name"] for m in machines))
+                                                             if machines else "this account has no sessions yet"))
+            name = cfg["agent_name"] = machines[0]["name"]
+    if not name: raise SystemExit("stair: name this machine with --agent-name (such as work-laptop); the name is stored as it is and readable on the ledger")
+    key = open(key_file, encoding="utf-8").read().strip()
+    try: aid = LedgerClient.resolve_agent_id(ResolveAgentOpts(api_key=key, endpoint=endpoint, name=name))
+    except Exception: aid = None
+    if account != "new" and aid and not plaintext:
+        held = account_keys(ask, aid)                               # this machine's sessions on the ledger, one data key each
+        mk = master_src or (master_path if master_path.exists() else None)
+        if mk:
+            try: mk_id = master_key_id(load_master_key(mk))
+            except Exception as e: raise SystemExit("stair: %s is not a master key this plugin can read (%s); nothing was changed" % (mk, str(e)[:120]))
+        if held and not fresh:
+            if not mk:
+                raise SystemExit("stair: the ledger holds %d sessions of %s, encrypted with a master key that is not on this machine; nothing was changed. "
+                                 "Run setup again with --restore and the folder where you kept master.key; or, if that key is lost, with --new-master-key: "
+                                 "those sessions then stay unreadable, to you as to anyone." % (len(held), name))
+            if not any(k.get("master_key_id") == mk_id for k in held):
+                raise SystemExit("stair: the master key in %s opens none of the %d sessions of %s on the ledger; nothing was changed. Restore the "
+                                 "master.key they were recorded with, or run setup again with --new-master-key." % (mk, len(held), name))
+    if account == "restored":
+        for src, dst in ((owner_src, key_path), (master_src, master_path)):
+            if src and not (dst.exists() and dst.read_bytes() == src.read_bytes()): set_aside(dst); copy_key(src, dst)
+    if not aid: aid = LedgerClient.register_agent(RegisterAgentOpts(api_key=key, endpoint=endpoint, name=name))["agent_id"]
+    cfg["agent_id"] = aid
+    if email or owner.get("email"): cfg["owner_email"] = email or owner.get("email")
+    elif account == "existing" and previous.get("owner_email"): cfg["owner_email"] = previous["owner_email"]
     if invite: cfg["invite_code"] = invite.strip()   # kept, so a later setup on this machine does not ask for it again
     if getattr(args, "viewer_url", None): cfg["viewer_url"] = args.viewer_url.rstrip("/")
-    use_sdk_src(cfg)
-    from reasoning_ledger import LedgerClient, RegisterAgentOpts, ResolveAgentOpts
-    key = api_key(cfg)
-    try: aid = LedgerClient.resolve_agent_id(ResolveAgentOpts(api_key=key, endpoint=cfg["endpoint"], name=cfg["agent_name"]))
-    except Exception: aid = LedgerClient.register_agent(RegisterAgentOpts(api_key=key, endpoint=cfg["endpoint"], name=cfg["agent_name"]))["agent_id"]
-    cfg["agent_id"] = aid
+    for k in ("viewer_url", "thinking_text"):          # choices made after setup are kept by a later one
+        if k not in cfg and (previous.get(k) or kept.get(k)): cfg[k] = previous.get(k) or kept.get(k)
     master_id = None
-    if not getattr(args, "plaintext", False):
-        cfg["master_key_file"] = str(HOME / "master.key"); master_id = ensure_master_key(HOME / "master.key")
+    if not plaintext:
+        if fresh and account != "new": set_aside(master_path)
+        cfg["master_key_file"] = str(master_path); master_id = ensure_master_key(master_path)
     json.dump(cfg, open(HOME / "config.json", "w", encoding="utf-8"), indent=1)
     probe = {"schema_version": "0.5", "agent_id": aid, "session_id": "stair:setup", "record_id": str(uuid.uuid4()), "behavior": "Other", "client_ts_utc": now_ms(),
              "executor": "det", "record_phase": "post_execution", "label": "stair.setup_probe",
-             "data": {"endpoint": cfg["endpoint"], "device": cfg["device"]["device_id"], "privacy_notice": cfg["privacy_notice"], "plugin": plugin_version()},
+             "data": {"endpoint": cfg["endpoint"], "device": cfg["device"]["device_id"], "privacy_notice": cfg["privacy_notice"], "plugin": plugin_version(), "account": account},
              "written_by": {"component": "stair", "credential": "owner_api_key"}, "classification": {"source": "instrumented", "mapper": "stair@0.3", "confidence": 1.0}}
     ok, failed = upload(cfg, [probe])
-    print(json.dumps({"ok": not failed, "agent_id": aid, "endpoint": cfg["endpoint"], "home": str(HOME), "device_id": cfg["device"]["device_id"],
-                      "encryption": "on" if master_id else "off", "master_key_id": master_id, "master_key_file": cfg.get("master_key_file"),
+    earlier = {"sessions_on_ledger": len(held), "readable_with_this_key": sum(1 for k in held if k.get("master_key_id") == master_id)} if account != "new" else {}
+    print(json.dumps({"ok": not failed, "account": account, "agent_id": aid, "agent_name": name, **earlier, "endpoint": cfg["endpoint"], "home": str(HOME),
+                      "device_id": cfg["device"]["device_id"], "encryption": "on" if master_id else "off", "master_key_id": master_id, "master_key_file": cfg.get("master_key_file"),
                       "privacy_notice_accepted": PRIVACY_NOTICE_VERSION, "owner": cfg.get("owner_email") or "anonymous",
                       **({"error": failed[0]["error"]} if failed else {})}))
     return 0 if not failed else 1
@@ -456,7 +539,9 @@ def status(args):
     command = {"path": str(cmd), "kind": "absent"}
     if cmd.is_symlink(): command["kind"] = "link to %s" % os.readlink(cmd)
     elif cmd.exists(): command["kind"] = "follows the installed version" if "stair-command" in cmd.read_text(errors="replace")[:300] else "other"
-    print(json.dumps({"ok": bool(cfg) and "error" not in enc, "configured": bool(cfg), "endpoint": cfg and cfg.get("endpoint"), "agent_id": cfg and cfg.get("agent_id"),
+    keys = {"owner_key": (HOME / "owner.key").exists(), "master_key": (HOME / "master.key").exists()}   # an uninstall leaves both
+    print(json.dumps({"ok": bool(cfg) and "error" not in enc, "configured": bool(cfg), "keys": keys, "endpoint": cfg and cfg.get("endpoint"),
+                      "agent_id": cfg and cfg.get("agent_id"), "agent_name": cfg and cfg.get("agent_name"),
                       "transcripts": len(states), "records_uploaded": up, "queued_events": q, "spooled": sp, "set_aside": invalid, "home": str(HOME), "encryption": enc,
                       "privacy_notice": (cfg or {}).get("privacy_notice"), "owner": (cfg or {}).get("owner_email") or ("anonymous" if cfg else None),
                       "plugin": NAME + " " + plugin_version(), "channel": CHANNEL["STAIR_CHANNEL"], "notice_pending": NOTICE_PENDING.exists(),
@@ -661,8 +746,9 @@ def revoke_cmd(args):
     r = owner_request(cfg, "DELETE", "/v1/view-grants/" + args.grant_id)
     print(json.dumps({"ok": bool(r.get("revoked")), "grant_id": args.grant_id})); return 0
 
-def owner_request(cfg, method, path, body=None, missing_ok=False):
-    """A request to the ledger as this owner, outside the SDK (the few owner-account calls). missing_ok: None on a 404."""
+def owner_request(cfg, method, path, body=None, missing_ok=False, refused=None):
+    """A request to the ledger as this owner, outside the SDK (the few owner-account calls). missing_ok: None on a 404.
+    refused: what to say when the ledger does not accept the key (401, 403)."""
     import urllib.request, urllib.error
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(cfg["endpoint"].rstrip("/") + path, data=data, method=method,
@@ -671,10 +757,35 @@ def owner_request(cfg, method, path, body=None, missing_ok=False):
         with urllib.request.urlopen(req, timeout=20) as res: return json.loads(res.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         if missing_ok and e.code == 404: return None
+        if refused and e.code in (401, 403): raise SystemExit("stair: " + refused)
         detail = e.read().decode("utf-8", "replace")[:300]
         try: detail = json.loads(detail).get("message") or detail
         except Exception: pass
         raise SystemExit("stair: the ledger answered %d: %s" % (e.code, detail))
+    except urllib.error.URLError as e:
+        raise SystemExit("stair: could not reach the ledger at %s (%s)" % (cfg["endpoint"], e.reason))
+
+def account_keys(cfg, agent_id=None):
+    """The wrapped data keys the ledger holds for this owner, or for one of its machines: one per recorded session, each
+    naming its machine (agent_id) and the master key that opens it (master_key_id). A ledger without content keys: none."""
+    out, after = [], None
+    while True:
+        page = owner_request(cfg, "GET", "/v1/content-keys?limit=1000%s%s" % ("&agent_id=" + agent_id if agent_id else "", "&after=" + after if after else ""), missing_ok=True)
+        if not page: return out
+        out += page.get("keys") or []
+        after = page.get("next_after")
+        if not after: return out
+
+def account_machines(cfg):
+    """The machines this owner's sessions came from, newest first: [{name, agent_id, last_session_at}]."""
+    last = {}
+    for k in account_keys(cfg):
+        if k.get("agent_id"): last[k["agent_id"]] = max(last.get(k["agent_id"], 0), k.get("created_at") or 0)
+    out = []
+    for aid, at in sorted(last.items(), key=lambda kv: -kv[1]):
+        a = owner_request(cfg, "GET", "/v1/agents/" + aid, missing_ok=True)
+        if a and a.get("name"): out.append({"name": a["name"], "agent_id": aid, "last_session_at": at})
+    return out
 
 def claim(args):
     """`claim EMAIL`: give this anonymous owner an e-mail, so the account can be found again and, later, recovered."""
@@ -918,11 +1029,13 @@ def map_cmd(args):
 def main():
     ap = argparse.ArgumentParser(prog="stair rl"); sub = ap.add_subparsers(dest="cmd")
     p = sub.add_parser("process"); p.add_argument("--delay", type=float, default=1.5)
-    s = sub.add_parser("setup"); s.add_argument("--endpoint", default=CHANNEL["STAIR_DEFAULT_ENDPOINT"], help="the ledger to write to (default: this channel's, %s)" % CHANNEL["STAIR_DEFAULT_ENDPOINT"]); s.add_argument("--agent-name", required=True)
+    s = sub.add_parser("setup"); s.add_argument("--endpoint", default=CHANNEL["STAIR_DEFAULT_ENDPOINT"], help="the ledger to write to (default: this channel's, %s)" % CHANNEL["STAIR_DEFAULT_ENDPOINT"]); s.add_argument("--agent-name", default=None, help="a short name for this machine, stored as it is and readable on the ledger (needed for a new account; reconnecting, setup keeps the earlier one)")
     s.add_argument("--api-key-file", default=None, help="file holding the owner key you were given")
     s.add_argument("--register", default=None, nargs="?", const="", metavar="EMAIL", help="create an owner on the ledger (the default when this machine has no owner key yet): anonymous, or for this e-mail; the key is saved to $STAIR_HOME/owner.key")
     s.add_argument("--registration-token-file", default=None, help="for an instance without self-service: file holding its registration token (or set STAIR_REGISTRATION_TOKEN)")
-    s.add_argument("--force", action="store_true", help="with --register: replace an existing owner.key")
+    s.add_argument("--restore", default=None, metavar="FOLDER", help="reconnect the account whose keys you kept: the folder holding owner.key and master.key (a copy of $STAIR_HOME, say); no invite code needed")
+    s.add_argument("--new-master-key", action="store_true", help="start a new content master key for an earlier account whose key is lost; its earlier sessions stay unreadable")
+    s.add_argument("--force", action="store_true", help="with --register or --restore: replace a different key here; it is moved to <name>.replaced-<time>, never deleted")
     s.add_argument("--invite", default=None, metavar="CODE", help="with --register on a ledger that registers by invitation: your invite code (or set STAIR_INVITE_CODE); kept in config.json")
     s.add_argument("--plaintext", action="store_true", help="upload content in the clear instead of encrypting it on this machine (not for the hosted ledger)")
     s.add_argument("--accept-privacy-notice", default=None, metavar="VERSION", help="the version of PRIVACY.md the person has read and accepts (currently %s); without it setup prints the notice and stops" % PRIVACY_NOTICE_VERSION)
