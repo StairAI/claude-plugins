@@ -2,6 +2,17 @@
 
 What each version of the Stair plugin for Claude Code changes for the person using it, newest first. When a newer version is out, the plugin says so at the start of a session together with the entries between your version and the new one, and Claude tells you more when you ask. A line that starts with "You do:" is something you have to do; it is said first.
 
+## 0.15.0
+
+Setting up Stair is shorter, and calmer: Claude reads the plugin's code and says in three lines what it found, shows you a short notice as written and asks one question.
+
+- Privacy: the notice is rewritten (version 2026-10-31) as questions and answers with a short version first. It now says why Stair keeps the record, and that each encrypted text carries a digest that a very short text can be guessed from. What is recorded and sent is unchanged.
+- You do: after the update, type /stair:notice once to read the short notice and accept it. Until then nothing is sent; the sessions in between wait on this machine, and you choose whether they are sent.
+- Leave a project out with `stair rl exclude <folder>`: sessions that work there are not recorded from then on.
+- See what would be sent for your last turn, without sending it: `stair rl preview`.
+- A changed notice no longer has Claude ask for your consent: the plugin tells you in one line, and you choose by typing /stair:notice.
+- A new account names this machine after its kind (claude-code-mac, say) instead of asking, and the machine's id is sent as a fingerprint made with your key.
+
 ## 0.14.0
 
 Installing Stair again gets your account back: the same records, no invite code, from the keys on this machine or the ones you kept.

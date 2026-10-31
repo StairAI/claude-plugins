@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # stair: the launcher of the Stair plugin for Claude Code.
-#   stair rl <command>   the ledger: setup, status, viewer, flush, map, process, key, admin (the `rl` word may be left out)
+#   stair rl <command>   the ledger: setup, status, viewer, preview, exclude, include, flush, map, process, key, admin (the
+#                        `rl` word may be left out)
 #   stair access …       the account and the services it reaches: token (a short-lived token for one Stair service, for a
 #                        skill's script), me, admin (handles and grants). Plain python3 is enough: no SDK needed.
-#   stair hook <Event>   fast path, bash only: append the hook's JSON to the local queue; on Stop/SessionEnd start the
-#                        detached processor (which maps the transcript and uploads). Never blocks Claude Code for long.
+#   stair hook <Event>   fast path, bash only: append the hook's JSON to the local queue (one per privacy notice), unless its
+#                        folder is left out; on Stop/SessionEnd start the detached processor (which maps the transcript and
+#                        uploads). Never blocks Claude Code for long.
 #   stair env            build the plugin's own Python environment with the ledger SDK in it (one per SDK version).
 #   stair link [dir]     put the command on PATH (~/.local/bin/<name>): a small script that always runs the version
 #                        Claude Code has installed, so an update needs nothing more.
@@ -115,6 +117,7 @@ fi
 if [ "${1:-}" = "hook" ]; then
   EVENT="${2:-unknown}"
   [ -f "$HOME_DIR/config.json" ] || exit 0          # not set up: do nothing, never break the session
+  notice="$(sed -n '/^PRIVACY_NOTICE_VERSION = /{s/^PRIVACY_NOTICE_VERSION = "\([0-9][0-9.-]*\)".*/\1/p;q;}' "$ROOT/rl_plugin.py" 2>/dev/null)"   # this version's notice
   if [ "$EVENT" = "SessionStart" ]; then
     printf '%s\n' "$ROOT" > "$HOME_DIR/plugin_root" 2>/dev/null       # the version sessions run now: the command falls back to it
     if [ -L "$HOME/.local/bin/$NAME" ]; then                          # a command linked into one version's directory (before
@@ -128,10 +131,9 @@ if [ "${1:-}" = "hook" ]; then
     fi
     if [ -f "$HOME_DIR/notice.pending.json" ]; then cat "$HOME_DIR/notice.pending.json"; mv -f "$HOME_DIR/notice.pending.json" "$HOME_DIR/notice.shown.json" 2>/dev/null; exit 0; fi   # what the makers left, once
     # Nothing left to say, yet this plugin's own privacy notice is newer than the one accepted (after an update from a
-    # version that never fetched notices, say): recording is paused, so say so now, from the two version numbers alone,
+    # version that never fetched notices, say): uploads are held, so say so now, from the two version numbers alone,
     # without the network or Python.
     accepted="$(tr -d '\n' < "$HOME_DIR/config.json" 2>/dev/null | sed -n 's/.*"privacy_notice": *{[^}]*"version": *"\([^"]*\)".*/\1/p')"
-    notice="$(sed -n 's/^PRIVACY_NOTICE_VERSION = "\([0-9][0-9.-]*\)".*/\1/p' "$ROOT/rl_plugin.py" | head -n 1)"
     older() {   # is notice $1 older than notice $2? by date, then by the number after the dot (2026-10-30.10 after .2)
       local d1="${1%%.*}" d2="${2%%.*}" n1 n2
       n1="${1#"$d1"}"; n1="${n1#.}"; n2="${2#"$d2"}"; n2="${n2#.}"
@@ -139,17 +141,27 @@ if [ "${1:-}" = "hook" ]; then
       [[ "$d1" < "$d2" ]] && return 0; [[ "$d1" > "$d2" ]] && return 1
       [ "$((10#$n1))" -lt "$((10#$n2))" ]
     }
-    if [ -n "$notice" ] && older "$accepted" "$notice"; then
-      where="$(printf '%s' "$ROOT/PRIVACY.md" | sed 's/\\/\\\\/g; s/"/\\"/g')"
-      printf '{"systemMessage": "Stair: the privacy notice changed (%s); recording is paused until you accept it.", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "Stair plugin (%s): the privacy notice changed to version %s, and uploads are paused until the person accepts it. Read %s to them in their language, ask for consent, and only with a clear yes run `%s rl accept-notice %s`."}}\n' \
-        "$notice" "$NAME" "$notice" "$where" "$NAME" "$notice"
+    if [ -n "$notice" ] && older "$accepted" "$notice"; then   # the person is told, and chooses in a command of their own;
+      # Claude is told the fact only, never asked to seek consent (a hook that did would look like an injected prompt)
+      printf '{"systemMessage": "Stair: the privacy notice changed (%s). Nothing is sent until you accept it: type /%s:notice.", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "Stair plugin (%s) notices for this machine, shown to the person as one line. Ask before running anything.\\nUploads are held until the person accepts privacy notice %s, which they do themselves by typing /%s:notice. If they ask about it, say so; do not ask for their consent or run anything for it yourself."}}\n' \
+        "$notice" "$NAME" "$NAME" "$notice" "$NAME"
     fi
     exit 0
   fi
-  mkdir -p "$HOME_DIR/queue" "$HOME_DIR/logs" 2>/dev/null || exit 0   # the processor's log must have a directory, or the spawn below fails silently
   PAYLOAD="$(cat)"                                   # the hook's JSON on stdin
+  if [ -s "$HOME_DIR/exclude" ]; then                # folders left out (`stair rl exclude`): their sessions are not even queued
+    cwd="$(printf '%s' "$PAYLOAD" | grep -o '"cwd" *: *"[^"]*"' | head -n 1 | sed 's/^"cwd" *: *"//; s/"$//; s/\\\\/\\/g')"
+    if [ -n "$cwd" ]; then
+      while IFS= read -r d || [ -n "$d" ]; do
+        [ -n "$d" ] || continue
+        case "$cwd/" in "${d%/}"/*) exit 0 ;; esac
+      done < "$HOME_DIR/exclude"
+    fi                                               # (the processor checks again, resolving links, and marks the session)
+  fi
+  Q="$HOME_DIR/queue${notice:+/n-$notice}"           # one queue per notice: a processor of an earlier version never takes it
+  mkdir -p "$Q" "$HOME_DIR/logs" 2>/dev/null || exit 0   # the processor's log must have a directory, or the spawn below fails silently
   TS="$(date +%s%3N 2>/dev/null)"; case "$TS" in ''|*[!0-9]*) TS="$(date +%s)000" ;; esac   # macOS date has no %N
-  printf '{"event":"%s","ts":%s,"payload":%s}\n' "$EVENT" "$TS" "${PAYLOAD:-{\}}" >> "$HOME_DIR/queue/events.jsonl" 2>/dev/null
+  printf '{"event":"%s","ts":%s,"payload":%s}\n' "$EVENT" "$TS" "${PAYLOAD:-{\}}" >> "$Q/events.jsonl" 2>/dev/null
   case "$EVENT" in
     Stop|SessionEnd)
       if [ -f "$ROOT/rl_plugin.py" ]; then

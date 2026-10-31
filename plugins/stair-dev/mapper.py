@@ -179,7 +179,8 @@ class Mapper:
         acting_of_turn = {}            # turn index -> Acting record id
         turn_first_ts = {}
         in_file = {d.get("uuid") for d in lines if d.get("uuid")}
-        info = {"turns": 0, "rewinds": 0, "forks": 0, "compactions": 0}
+        info = {"turns": 0, "rewinds": 0, "forks": 0, "compactions": 0,
+                "cwds": sorted({d["cwd"] for d in lines if isinstance(d.get("cwd"), str)})}   # where it worked: never uploaded
         # A fork made by the app starts with the parent's lines, still under the parent's sessionId. The file's own session
         # is the one its last lines carry; the copied history before it is walked (for turn numbers and links) but not
         # emitted: it happened in the parent session and was recorded there, under the same record ids.
