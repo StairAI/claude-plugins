@@ -9,7 +9,7 @@ on Stop / SessionEnd, starts this program detached. This program then:
   * uploads the records that have not been uploaded yet, in batches, through the Python SDK,
   * remembers what was uploaded per transcript.
 
-Commands: process (drain the queue), setup, status, flush (retry the spool), map (dry run: map a transcript), preview (the last turn as the ledger would get it, sent nowhere), exclude / include (leave a folder out, or take it back), viewer (a one-time sign-in link to the viewer; the key stays in its file), key (the content master key: rotate), notices / accept-notice (the makers' notices; accept the privacy notice), admin (invite codes, with the ledger's administrator token). Nothing is asked of the model: every record comes from the transcript and the hook events.
+Commands: process (drain the queue), setup, status, flush (retry the spool), map (dry run: map a transcript), preview (the last turn as the ledger would get it, sent nowhere), exclude / include (leave a folder out, or take it back), viewer (a one-time sign-in link to the viewer; the key stays in its file), key (the content master key: rotate), notices / accept-notice / notice-later (the makers' notices; accept the privacy notice; "Not now"), admin (invite codes, with the ledger's administrator token). Nothing is asked of the model: every record comes from the transcript and the hook events.
 
 Content is encrypted on this machine before upload (the SDK's ContentEncryption): setup makes a master key, kept in master.key and never sent; the ledger holds ciphertext and wrapped per-session keys. The viewer link carries the master key in its fragment, which the browser keeps to itself.
 State under $STAIR_HOME (default ~/.stair): config.json, owner.key, master.key, exclude (folders left out), queue/n-<notice>/events.jsonl, state/<transcript>.json, spool.jsonl, logs/.
@@ -42,6 +42,8 @@ def channel():
 
 NAME = plugin_name()
 CHANNEL = channel()
+# Which channel speaks, at the start of every line the person is shown: "Stair" (release) or "Stair staging", from channel.env.
+LABEL = CHANNEL.get("STAIR_LABEL") or ("Stair" if CHANNEL.get("STAIR_CHANNEL") == "release" else "Stair staging")
 # Each channel keeps its state under ~/.<name>: ~/.stair for the release channel, ~/.stair-dev for the source.
 # Run from anywhere but Claude Code's plugin cache (a source checkout, --plugin-dir), the state is kept apart: ~/.<name>-src.
 HOME = Path(os.environ.get("STAIR_HOME") or os.environ.get("RL_PLUGIN_HOME") or Path.home() / ("." + NAME + ("" if "/plugins/cache/" in str(HERE) else "-src")))
@@ -878,8 +880,12 @@ def claim(args):
 
 # ---------------------------------------------------------------- notices: what the plugin's makers want the person to know
 NOTICES_FILE = HOME / "notices.json"              # what was fetched, when, and which notices were shown
-NOTICE_PENDING = HOME / "notice.pending.json"      # the next SessionStart hook prints this and renames it
+NOTICE_PENDING = HOME / "notice.pending.json"      # the launcher says this at the next new session, then renames it
 NOTICE_SHOWN = HOME / "notice.shown.json"
+# Under HOME, for the launcher's reminder that uploads wait: the notice they wait for; "<notice> <until>" after the person chose
+# "Not now" (no reminder of it until then); "<notice> <when>" of the last reminder of it (one a day at most).
+NOTICE_PAUSED, NOTICE_LATER, NOTICE_REMINDED = "notice.paused", "notice.later", "notice.reminded"
+LATER_SECONDS = 7 * 24 * 3600
 NOTICES_EVERY_MS = 60 * 60 * 1000
 VERSION_RE = re.compile(r"\d+(\.\d+){1,3}")                    # what a plugin version in the notices file may look like
 def notice_key(v):
@@ -970,50 +976,55 @@ def changes_file(mkt):
         return str(HERE.parents[3] / "marketplaces" / mkt / "plugins" / NAME / "CHANGES.md")
     return "https://github.com/StairAI/claude-plugins/blob/%s/plugins/%s/CHANGES.md" % ("staging" if NAME == "stair-dev" else "main", NAME)
 
-# What Claude is told of a changed notice: a fact, never a task. Consent is asked only in a command the person types
-# (/stair:notice); a hook that has the model ask for consent cannot be told apart from an injected prompt.
+# What Claude is told of a held upload: a fact, never a task. Consent is asked only in a command the person types
+# (/stair:notice); a hook that has the model ask for consent cannot be told apart from an injected prompt. The launcher
+# (bin/stair) says it in these words at every session start, worked out from the version numbers alone.
 NOTICE_CONTEXT = ("Uploads are held until the person accepts privacy notice %s, which they do themselves by typing /%s:notice. "
                   "If they ask about it, say so; do not ask for their consent or run anything for it yourself.")
 
-def render_pending(pending, paused):
-    """What the SessionStart hook prints. The person gets one line, which may quote the makers' words (systemMessage).
-    Claude gets only sentences built here from version numbers and kinds (additionalContext), never text from the notices
-    file: whoever can change that file could otherwise instruct every installed assistant without a release."""
-    if not pending and not paused: return None
+def render_pending(pending):
+    """What the launcher says of the makers' notices at the next new session (never at a resume, a /clear, a compaction or
+    a fork). The person gets one line, which may quote the makers' words ("message"); Claude gets only sentences built here
+    from version numbers and kinds ("context"), never text from the notices file: whoever can change that file could
+    otherwise instruct every installed assistant without a release. That uploads wait for a privacy notice is the
+    launcher's to say, from the versions: at most once a day, and not for a week after the person chose "Not now"."""
+    if not pending: return None
     mkt = "stair-ai-dev" if NAME == "stair-dev" else "stair-ai"
     update = "claude plugin marketplace update %s && claude plugin update %s@%s" % (mkt, NAME, mkt)
-    lines = []; ctx = ["Stair plugin (%s) notices for this machine, shown to the person as one line. Ask before running anything." % NAME]
+    lines, ctx = [], []
     for n in pending:
         kind = n.get("kind")
         if kind == "update":
             changes = n.get("changes") or []
             summary = str(changes[0].get("summary") or "").strip().rstrip(".") if changes else ""
-            lines.append("Stair: %s %s is available (you have %s)%s. Say \"update stair\" to update, or ask what changed." % (NAME, n["latest"], n["installed"], ": " + summary if summary else ""))
+            lines.append("%s: %s %s is available (you have %s)%s. Say \"update stair\" to update, or ask what changed." % (LABEL, NAME, n["latest"], n["installed"], ": " + summary if summary else ""))
             ctx.append("Update available: %s %s (installed: %s). If they want it, run `%s` (both, in this order: the first fetches the "
                        "marketplace), then tell them the new version applies to sessions started after the update; the `%s` command and the "
                        "plugin's Python environment follow by themselves." % (NAME, n["latest"], n["installed"], update, NAME))
             ctx.append("If they ask what it changes: run only `claude plugin marketplace update %s`, then read the entries newer than %s in %s and "
                        "tell them in their language, anything starting with \"Privacy:\" or \"You do:\" first." % (mkt, n["installed"], changes_file(mkt)))
-        elif kind == "privacy":
-            v = n["privacy_notice_version"]
-            lines.append("Stair: the privacy notice changed (%s). Nothing is sent until you accept it: type /%s:notice.%s" % (v, NAME, " " + str(n["text"]) if n.get("text") else ""))
-            ctx.append(NOTICE_CONTEXT % (v, NAME))
+        elif kind == "privacy":   # that uploads wait, and how to choose, the launcher says; the makers' words, if any, follow it
+            if n.get("text"): lines.append("%s: %s" % (LABEL, str(n["text"])))
         else:
-            lines.append("Stair: " + str(n.get("title") or "") + (": " + str(n["text"]) if n.get("text") else ""))
+            lines.append(LABEL + ": " + str(n.get("title") or "") + (": " + str(n["text"]) if n.get("text") else ""))
             ctx.append("The plugin's makers left the person a message, shown to them; you are not given its words.")
-    if paused and not any(n.get("kind") == "privacy" for n in pending):
-        lines.append("Stair: nothing is sent until you accept the new privacy notice (%s): type /%s:notice." % (paused["privacy_notice_version"], NAME))
-        ctx.append(NOTICE_CONTEXT % (paused["privacy_notice_version"], NAME))
-    return {"ids": [n["id"] for n in pending], "for_version": plugin_version(), "systemMessage": " ".join(lines),
-            "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "\n".join(ctx)}}
+    return {"ids": [n["id"] for n in pending], "for_version": plugin_version(), "message": " ".join(lines), "context": "\n".join(ctx)}
 
 def refresh_notices(cfg, force=False, offline=False):
-    """After an upload run: record what was shown, fetch, and leave what should be said next for the SessionStart hook."""
+    """After an upload run: record what was shown, fetch, and leave for the launcher what to say at the next new session
+    (notice.pending.json, one key per line, which it reads in bash) and which privacy notice uploads wait for."""
     mark_shown()
     cache = fetch_notices(cfg, force=force, offline=offline)
-    out = render_pending(pending_notices(cfg, cache), uploads_paused(cfg, cache))
+    paused = uploads_paused(cfg, cache)
+    try:
+        if paused: HOME.mkdir(parents=True, exist_ok=True); (HOME / NOTICE_PAUSED).write_text(paused["privacy_notice_version"] + "\n", encoding="utf-8")
+        elif (HOME / NOTICE_PAUSED).exists(): (HOME / NOTICE_PAUSED).unlink()
+    except Exception as e: log("notices-paused", e)
+    out = render_pending(pending_notices(cfg, cache))
     if out:
-        NOTICE_PENDING.parent.mkdir(parents=True, exist_ok=True); json.dump(out, open(NOTICE_PENDING, "w", encoding="utf-8"), indent=1)
+        NOTICE_PENDING.parent.mkdir(parents=True, exist_ok=True); tmp = NOTICE_PENDING.with_name("notice.pending.tmp")
+        with open(tmp, "w", encoding="utf-8") as f: json.dump(out, f, indent=1)   # ASCII only: the launcher copies the strings into its JSON
+        os.replace(tmp, NOTICE_PENDING)
     elif NOTICE_PENDING.exists():
         NOTICE_PENDING.unlink()
     return out
@@ -1057,9 +1068,25 @@ def accept_notice(args):
     left_out = skip_waiting() if getattr(args, "skip_waiting", False) else 0
     cfg["privacy_notice"] = {"version": PRIVACY_NOTICE_VERSION, "accepted_at": now_ms()}
     json.dump(cfg, open(HOME / "config.json", "w", encoding="utf-8"), indent=1)
+    for f in (HOME / NOTICE_LATER, HOME / NOTICE_REMINDED):   # the reminder's state is of the notice just accepted
+        try: f.unlink()
+        except FileNotFoundError: pass
     refresh_notices(cfg, force=True)
     print(json.dumps({"ok": True, "privacy_notice": cfg["privacy_notice"], "uploads_paused": False,
                       "waiting_sessions_sent": waiting - left_out, "waiting_sessions_left_out": left_out})); return 0
+
+def notice_later(args):
+    """`notice-later`: the person chose "Not now" in /stair:notice. Nothing changes but the reminder: no line about this
+    notice at the start of a session for a week. Uploads stay held; /stair:notice brings them back to the choice any time."""
+    cfg = load_config()
+    if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
+    paused = uploads_paused(cfg, fetch_notices(cfg, offline=True))
+    if not paused: print(json.dumps({"ok": True, "uploads_paused": False})); return 0
+    until = int(time.time()) + LATER_SECONDS
+    HOME.mkdir(parents=True, exist_ok=True)
+    (HOME / NOTICE_LATER).write_text("%s %d\n" % (paused["privacy_notice_version"], until), encoding="utf-8")
+    print(json.dumps({"ok": True, "uploads_paused": True, "privacy_notice": paused["privacy_notice_version"],
+                      "no_reminder_until": time.strftime("%Y-%m-%d", time.localtime(until))})); return 0
 
 def exclude_cmd(args):
     """`exclude [FOLDER]`: leave a folder out (the current one by default). Sessions that work in it, or below it, are not
@@ -1275,6 +1302,7 @@ def main():
     n = sub.add_parser("notices", help="what the plugin's makers want you to know"); n.add_argument("--fetch", action="store_true", help="fetch now instead of using the hourly cache"); n.add_argument("--rebuild", action="store_true", help="write the next session's notice again from what was last fetched, without the network")
     acc = sub.add_parser("accept-notice", help="accept the current privacy notice after reading PRIVACY.md"); acc.add_argument("version")
     acc.add_argument("--skip-waiting", action="store_true", help="leave out for good the sessions queued while uploads were held, instead of sending them")
+    sub.add_parser("notice-later", help="the person chose \"Not now\": no reminder of this notice at the start of a session for a week")
     ex = sub.add_parser("exclude", help="leave a folder out: sessions that work in it are not recorded"); ex.add_argument("folder", nargs="?", default=None, help="the folder (default: the current one)")
     ex.add_argument("--list", action="store_true", help="list the folders left out")
     inc = sub.add_parser("include", help="record new sessions in a folder left out before"); inc.add_argument("folder")
@@ -1291,7 +1319,7 @@ def main():
     ad.add_argument("what", nargs="?", default="invites", help=argparse.SUPPRESS)
     a = ap.parse_args()
     fn = {"process": process, "setup": setup, "status": status, "flush": flush, "map": map_cmd, "viewer": viewer, "key": key_cmd, "admin": admin_cmd,
-          "claim": claim, "notices": notices_cmd, "accept-notice": accept_notice, "grants": grants_cmd, "revoke": revoke_cmd,
+          "claim": claim, "notices": notices_cmd, "accept-notice": accept_notice, "notice-later": notice_later, "grants": grants_cmd, "revoke": revoke_cmd,
           "exclude": exclude_cmd, "include": include_cmd, "preview": preview}.get(a.cmd)
     if fn is None: ap.print_help(); return 1
     return fn(a)

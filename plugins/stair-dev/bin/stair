@@ -28,6 +28,9 @@ if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then ROOT="$CLAUDE_PLUGIN_ROOT"; else ROOT=
 NAME="$(sed -n 's/^[[:space:]]*"name":[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/.claude-plugin/plugin.json" 2>/dev/null | head -n 1)"
 NAME="${NAME:-stair}"
 [ -f "$ROOT/channel.env" ] && . "$ROOT/channel.env"
+# Which channel speaks, at the start of every line the person is shown ("Stair" or "Stair staging"); it goes into JSON as is.
+LABEL="${STAIR_LABEL:-}"; [ -n "$LABEL" ] || { if [ "${STAIR_CHANNEL:-dev}" = release ]; then LABEL=Stair; else LABEL="Stair staging"; fi; }
+LABEL="$(printf '%s' "$LABEL" | tr -d '"\\\n')"
 # Run from anywhere but Claude Code's plugin cache (a source checkout, --plugin-dir, a directory marketplace), the plugin
 # keeps its state apart, so a development copy never shares a queue or an account with the installed one.
 case "$ROOT" in */plugins/cache/*) SRC_SUFFIX="" ;; *) SRC_SUFFIX="-src" ;; esac
@@ -119,20 +122,37 @@ if [ "${1:-}" = "hook" ]; then
   [ -f "$HOME_DIR/config.json" ] || exit 0          # not set up: do nothing, never break the session
   notice="$(sed -n '/^PRIVACY_NOTICE_VERSION = /{s/^PRIVACY_NOTICE_VERSION = "\([0-9][0-9.-]*\)".*/\1/p;q;}' "$ROOT/rl_plugin.py" 2>/dev/null)"   # this version's notice
   if [ "$EVENT" = "SessionStart" ]; then
+    # Why the session starts, from the hook's JSON: startup (a new session), resume, clear, compact or fork. The person is
+    # told things only when a session starts anew; the other starts show nothing and tell Claude the facts again (a
+    # compaction or a /clear lost them). No source given (an older Claude Code): a new session.
+    src=""; [ -t 0 ] || src="$(cat | grep -o '"source" *: *"[a-z_]*"' | head -n 1 | sed 's/.*"\([a-z_]*\)"$/\1/')"
+    case "$src" in ''|startup) STARTUP=1 ;; *) STARTUP=0 ;; esac
     printf '%s\n' "$ROOT" > "$HOME_DIR/plugin_root" 2>/dev/null       # the version sessions run now: the command falls back to it
     if [ -L "$HOME/.local/bin/$NAME" ]; then                          # a command linked into one version's directory (before
       case "$(readlink "$HOME/.local/bin/$NAME")" in */plugins/cache/*/"$NAME"/*/bin/stair) write_command "$HOME/.local/bin/$NAME" 2>/dev/null ;; esac
     fi                                                                # 0.11.1) would stay behind: it becomes the script
     if [ -z "$PY" ] && [ ! -d "$HOME_DIR/venv.lock" ]; then detach "$ROOT/bin/stair" env; fi   # a new SDK: build it before the turn ends
-    if [ -f "$HOME_DIR/notice.pending.json" ] && ! grep -q "\"for_version\": \"$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/.claude-plugin/plugin.json" | head -n 1)\"" "$HOME_DIR/notice.pending.json" 2>/dev/null; then
-      rm -f "$HOME_DIR/notice.pending.json"                           # another version wrote it: write it again for this one,
+    P="$HOME_DIR/notice.pending.json"
+    if [ -f "$P" ] && ! grep -q "\"for_version\": \"$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/.claude-plugin/plugin.json" | head -n 1)\"" "$P" 2>/dev/null; then
+      rm -f "$P"                                                      # another version wrote it: write it again for this one,
       rp="$PY"; [ -n "$rp" ] || rp="$(command -v python3.12 || command -v python3.11 || true)"   # from what was last fetched
       [ -n "$rp" ] && "$rp" -P "$ROOT/rl_plugin.py" notices --rebuild >/dev/null 2>&1          # (no network)
     fi
-    if [ -f "$HOME_DIR/notice.pending.json" ]; then cat "$HOME_DIR/notice.pending.json"; mv -f "$HOME_DIR/notice.pending.json" "$HOME_DIR/notice.shown.json" 2>/dev/null; exit 0; fi   # what the makers left, once
-    # Nothing left to say, yet this plugin's own privacy notice is newer than the one accepted (after an update from a
-    # version that never fetched notices, say): uploads are held, so say so now, from the two version numbers alone,
-    # without the network or Python.
+    json_str() {   # the top-level string "$1" of the file $2, which the processor writes one key per line: still JSON-escaped
+      sed -n "s/^ \"$1\": \"\(.*\)\",\{0,1\}\$/\1/p" "$2" 2>/dev/null | head -n 1
+    }
+    NL='\n'; DASH='\u2014'; line=""; ctx=""
+    # What the makers left (a new version, a message), written by the processor after its last run: said once, at the
+    # next new session; until then Claude is told of it at every start.
+    if [ -f "$P" ]; then
+      ctx="$(json_str context "$P")"
+      if [ "$STARTUP" = 1 ]; then line="$(json_str message "$P")"; mv -f "$P" "$HOME_DIR/notice.shown.json" 2>/dev/null; fi
+    fi
+    # Uploads held for a privacy notice not accepted yet: this plugin's own, newer than the one accepted, or one the makers
+    # published (the processor leaves its version in notice.paused). Worked out here from the version numbers alone,
+    # without the network or Python. Claude is told the fact at every start and never asked to seek consent (a hook that
+    # did would look like an injected prompt); the person is told at a new session, at most once a day, and not for a
+    # week after choosing "Not now" in /<name>:notice.
     accepted="$(tr -d '\n' < "$HOME_DIR/config.json" 2>/dev/null | sed -n 's/.*"privacy_notice": *{[^}]*"version": *"\([^"]*\)".*/\1/p')"
     older() {   # is notice $1 older than notice $2? by date, then by the number after the dot (2026-10-30.10 after .2)
       local d1="${1%%.*}" d2="${2%%.*}" n1 n2
@@ -141,11 +161,33 @@ if [ "${1:-}" = "hook" ]; then
       [[ "$d1" < "$d2" ]] && return 0; [[ "$d1" > "$d2" ]] && return 1
       [ "$((10#$n1))" -lt "$((10#$n2))" ]
     }
-    if [ -n "$notice" ] && older "$accepted" "$notice"; then   # the person is told, and chooses in a command of their own;
-      # Claude is told the fact only, never asked to seek consent (a hook that did would look like an injected prompt)
-      printf '{"systemMessage": "Stair: the privacy notice changed (%s). Nothing is sent until you accept it: type /%s:notice.", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "Stair plugin (%s) notices for this machine, shown to the person as one line. Ask before running anything.\\nUploads are held until the person accepts privacy notice %s, which they do themselves by typing /%s:notice. If they ask about it, say so; do not ask for their consent or run anything for it yourself."}}\n' \
-        "$notice" "$NAME" "$NAME" "$notice" "$NAME"
+    due() {   # may the person be reminded of notice $1 now? Not within a day of the last reminder of it, nor before the
+      local now v t; now="$(date +%s)"   # end of the week they asked for with "Not now"
+      v=""; t=""; [ -f "$HOME_DIR/notice.later" ] && read -r v t < "$HOME_DIR/notice.later"
+      case "$t" in ''|*[!0-9]*) t=0 ;; esac
+      [ "$v" = "$1" ] && [ "$t" -gt "$now" ] && return 1
+      v=""; t=""; [ -f "$HOME_DIR/notice.reminded" ] && read -r v t < "$HOME_DIR/notice.reminded"
+      case "$t" in ''|*[!0-9]*) t=0 ;; esac
+      [ "$v" = "$1" ] && [ $((now - t)) -lt 86400 ] && return 1
+      return 0
+    }
+    held=""
+    if [ -n "$notice" ] && older "$accepted" "$notice"; then held="$notice"
+    else
+      v="$(head -n 1 "$HOME_DIR/notice.paused" 2>/dev/null | tr -cd '0-9.-')"
+      if [ -n "$v" ] && older "$accepted" "$v"; then held="$v"; fi
     fi
+    if [ -n "$held" ]; then
+      ctx="Uploads are held until the person accepts privacy notice $held, which they do themselves by typing /$NAME:notice. If they ask about it, say so; do not ask for their consent or run anything for it yourself.${ctx:+$NL$ctx}"
+      if [ "$STARTUP" = 1 ] && due "$held"; then
+        line="$LABEL: the privacy notice was updated. Your sessions stay on this machine until you choose $DASH type /$NAME:notice.${line:+ $line}"
+        printf '%s %s\n' "$held" "$(date +%s)" > "$HOME_DIR/notice.reminded" 2>/dev/null
+      fi
+    fi
+    [ -n "$line$ctx" ] || exit 0
+    ctx="Stair plugin ($NAME) notices for this machine. Ask before running anything.${ctx:+$NL$ctx}"
+    if [ -n "$line" ]; then printf '{"systemMessage": "%s", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "%s"}}\n' "$line" "$ctx"
+    else printf '{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "%s"}}\n' "$ctx"; fi
     exit 0
   fi
   PAYLOAD="$(cat)"                                   # the hook's JSON on stdin

@@ -2,6 +2,15 @@
 
 What each version of the Stair plugin for Claude Code changes for the person using it, newest first. When a newer version is out, the plugin says so at the start of a session together with the entries between your version and the new one, and Claude tells you more when you ask. A line that starts with "You do:" is something you have to do; it is said first.
 
+## 0.15.1
+
+Stair's one line at the start of a session comes less often and says which channel it is from.
+
+- The line is shown only when you start a new session, not when one resumes, is cleared, is compacted or is forked.
+- The reminder that the privacy notice changed comes at most once a day. Choose "Not now" in /stair:notice and it stays quiet for a week; nothing is sent meanwhile.
+- The line starts with the channel: "Stair" for the release, "Stair staging" for the staging channel. It now reads: "the privacy notice was updated. Your sessions stay on this machine until you choose — type /stair:notice."
+- When the question box cannot be shown, /stair:notice asks the same question in plain text.
+
 ## 0.15.0
 
 Setting up Stair is shorter, and calmer: Claude reads the plugin's code and says in three lines what it found, shows you a short notice as written and asks one question.
