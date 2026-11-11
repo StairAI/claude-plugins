@@ -2,6 +2,17 @@
 
 What each version of the Stair plugin for Claude Code changes for the person using it, newest first. When a newer version is out, the plugin says so at the start of a session together with the entries between your version and the new one, and Claude tells you more when you ask. A line that starts with "You do:" is something you have to do; it is said first.
 
+## 0.16.0
+
+Stair apps: `/stair-dev:app` lists the Stair services your account may use and does what you ask with one, starting with share, which publishes a page for your team. The privacy notice says what an app gets (version 2026-11-11).
+
+- You do: after the update, type /stair-dev:notice once to read what changed in the notice and accept it. Until then nothing is sent; the sessions in between wait on this machine, and you choose whether they are sent.
+- `/stair-dev:app share <file or folder>` publishes a page at share.stair-ai.com under your handle; `/stair-dev:app` with nothing after it lists your apps. Today only Stair's team has access to an app; for anyone else the list is empty.
+- Before anything goes to an app, Claude says which files, where they go and who can open them. A page is not encrypted, and anyone with its link can open it.
+- `stair-dev access apps` lists the same apps for a program, each with its address and its own documentation.
+- /stair-dev:notice now shows every change to the notice since the version you accepted, not only the newest.
+- Privacy: notice version 2026-11-11 adds "What do Stair's apps send?". What is recorded for you, and how, is unchanged.
+
 ## 0.15.3
 
 After an update, a session you opened before it goes on recording without rebuilding anything.

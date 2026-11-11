@@ -1,7 +1,7 @@
 {
   "_about": "What the plugin's makers want people to know. The plugin fetches this file at most hourly and says what applies at the start of the next session; the person decides. latest_version and changes (from claude-code/CHANGES.md) are filled by publish.sh for the channel it publishes: stair on main, stair-dev on staging; each channel reads its own branch's copy. A notice: {id, kind: update|privacy|info, title, text, until?: YYYY-MM-DD, channel?: release|dev, privacy_notice_version?: for kind privacy}.",
   "latest_version": {
-    "stair-dev": "0.15.3"
+    "stair-dev": "0.16.0"
   },
   "notices": [
     {
@@ -12,13 +12,27 @@
       "text": "Fingerprints are now keyed, the makers' notices no longer reach Claude, the machine name is said to be readable, the viewer opens a limited, recorded grant instead of carrying your master key, and the notice says where that protection ends. Update the plugin, then type /stair-dev:notice in a new session."
     },
     {
-      "id": "changes:0.15.3",
+      "id": "changes:0.16.0",
       "kind": "changes",
-      "title": "What's new in stair-dev 0.15.3",
-      "text": "After an update, a session you opened before it goes on recording without rebuilding anything. Details: https://github.com/StairAI/claude-plugins/blob/staging/plugins/stair-dev/CHANGES.md"
+      "title": "What's new in stair-dev 0.16.0",
+      "text": "Stair apps: `/stair-dev:app` lists the Stair services your account may use and does what you ask with one, starting with share, which publishes a page for your team. The privacy notice says what an app gets (version 2026-11-11). Details: https://github.com/StairAI/claude-plugins/blob/staging/plugins/stair-dev/CHANGES.md"
     }
   ],
   "changes": [
+    {
+      "version": "0.16.0",
+      "summary": "Stair apps: `/stair-dev:app` lists the Stair services your account may use and does what you ask with one, starting with share, which publishes a page for your team. The privacy notice says what an app gets (version 2026-11-11).",
+      "you_do": [
+        "after the update, type /stair-dev:notice once to read what changed in the notice and accept it. Until then nothing is sent; the sessions in between wait on this machine, and you choose whether they are sent."
+      ],
+      "items": [
+        "`/stair-dev:app share <file or folder>` publishes a page at share.stair-ai.com under your handle; `/stair-dev:app` with nothing after it lists your apps. Today only Stair's team has access to an app; for anyone else the list is empty.",
+        "Before anything goes to an app, Claude says which files, where they go and who can open them. A page is not encrypted, and anyone with its link can open it.",
+        "`stair-dev access apps` lists the same apps for a program, each with its address and its own documentation.",
+        "/stair-dev:notice now shows every change to the notice since the version you accepted, not only the newest.",
+        "Privacy: notice version 2026-11-11 adds \"What do Stair's apps send?\". What is recorded for you, and how, is unchanged."
+      ]
+    },
     {
       "version": "0.15.3",
       "summary": "After an update, a session you opened before it goes on recording without rebuilding anything.",
@@ -136,19 +150,6 @@
         "After an update, the first session shows what the previous version left to say, such as a changed privacy notice, instead of skipping it.",
         "On Linux the viewer opens a browser only when you run it yourself; run by an assistant, it says to run it in your own terminal.",
         "`stair-dev rl status` calls the SDK's own version number `sdk_package_version`, beside the pin that chose it (`sdk`)."
-      ]
-    },
-    {
-      "version": "0.12.0",
-      "summary": "The viewer works by grants: each view is a limited, recorded authorization, and your master key stays on your machine.",
-      "you_do": [
-        "after updating, accept the privacy notice; Claude reads it to you and asks."
-      ],
-      "items": [
-        "Privacy: `stair-dev rl viewer` no longer puts your master key in the link. It grants a view of your sessions of the last seven days for an hour (`--days`, `--hours`): their keys are wrapped again here under a fresh key that only the link carries, and the grant is recorded in your ledger. When it ends, the ledger drops those keys and the link opens nothing.",
-        "Privacy: Claude is never shown the link's key. The plugin opens the link in your browser, or prints it only in a terminal of your own; when Claude Code runs on another machine, run `stair-dev rl viewer` in a terminal there.",
-        "Privacy: the privacy notice is now version 2026-10-30.1, describing the viewer as it now works. Recording pauses until you accept it.",
-        "`stair-dev rl grants` lists your grants; `stair-dev rl revoke <grant>` ends one now."
       ]
     }
   ]

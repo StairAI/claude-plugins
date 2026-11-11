@@ -1,6 +1,6 @@
 # Stair's privacy notice
 
-Notice version `2026-10-31`. You accept a version at setup; the plugin keeps a note of which one, and asks again when it changes.
+Notice version `2026-11-11`. You accept a version at setup; the plugin keeps a note of which one, and asks again when it changes.
 
 ## In short
 
@@ -9,6 +9,7 @@ Stair keeps a record of your Claude Code sessions in an account that is yours, s
 - Which sessions: every session on this machine. You can leave a project out.
 - Our server sees the shape of the work: for example, that Bash ran four times, and for how long.
 - It can't see the words. Prompts, answers, commands, code and file paths are encrypted on this machine, with a key that stays here.
+- A page you publish is another matter: if your account has access to share (today, Stair's team), `/stair-dev:app share` puts a file you name on share.stair-ai.com when you ask, as it is. It is not encrypted, and anyone with its link can open it.
 - No sign-up, no e-mail.
 - Any time: view your records, stop by uninstalling, or ask us to delete them.
 
@@ -18,13 +19,13 @@ Stair AI runs the server.
 
 ### Why does Stair keep this record?
 
-So that you can look back at how your agent worked: what it was asked, what it did, and how it turned out. That is all it is for today. Before it is used for anything else, such as sharing, this notice changes and you are asked again.
+So that you can look back at how your agent worked: what it was asked, what it did, and how it turned out. That is all it is for today. Before it is used for anything else, such as sharing your records, this notice changes and you are asked again.
 
 ### What is recorded?
 
 Each turn of each session, from the transcript Claude Code writes: your prompt and the final answer; each tool call, what it was given and returned, how long it took, whether it worked; questions Claude asked and your answers; permission prompts and your choice; sub-agents and their tasks; plans; and writes to memory files, CLAUDE.md, skills and settings. Of a thinking block only its size and a fingerprint go, and of a file Claude writes only its path and a fingerprint, encrypted.
 
-The plugin reads nothing else but its own files and this machine's system id, which tells your machines apart and reaches the server only as a hash. Nothing is asked of the model: the record is made from the transcript alone.
+To make the record, the plugin reads nothing else but its own files and this machine's system id, which tells your machines apart and reaches the server only as a hash. Nothing is asked of the model: the record is made from the transcript alone.
 
 ### What does the server see, and what not?
 
@@ -42,6 +43,18 @@ Leave that project out: `stair-dev rl exclude <folder>` (Claude can run it for y
 
 Yes: `stair-dev rl preview` shows the last turn of a session as the server would get it, the readable shape beside the encrypted parts, and sends nothing.
 
+### What do Stair's apps send?
+
+An app is a Stair service your account is given access to; `/stair-dev:app` lists yours. Today there is one, share, for publishing pages, and only Stair's team has access to it.
+
+An app works only when you ask, never in the background, and takes only what you name. Before anything goes, Claude tells you which files, where they go and who can open them.
+
+What you give an app is not part of your record and is not encrypted. Share keeps each file as it is, at `share.stair-ai.com/<your handle>/<the name you give>/` (the team's staging channel uses `stg-share.stair-ai.com`). Anyone with the link can open it, and so can Stair AI, which runs the site. The site lists nothing and asks search engines to stay out, so a page is found by the people you send it to. It stays until you take it down, and is then gone.
+
+To reach an app, the plugin shows your account key to Stair's access gate and gets back a pass that lasts a short while and works for that app alone; the key itself goes to no app.
+
+An app that would send anything on its own, or keep more than what you give it, comes with a change to this notice first.
+
 ### Who am I to the server?
 
 An account with no name or e-mail: two keys made on this machine are its identity. You can attach an e-mail any time with `stair-dev rl claim you@example.com`; it is used only to find the account again. This machine's name in your account (`claude-code-mac`, say, unless you pick one) is readable on the server.
@@ -53,6 +66,7 @@ An account with no name or e-mail: two keys made on this machine are its identit
 - Stop: uninstall the plugin (`claude plugin uninstall stair-dev@stair-ai-dev`). Your keys stay in `~/.stair-dev`, so installing again picks up the same account; delete that folder to forget it.
 - Have your account and records deleted: write to colin@stair-ai.com with the `agent_id` that `stair-dev rl status` shows. In this alpha we do it for you.
 - Make a new content key: `stair-dev rl key rotate`.
+- Take a page down: ask Claude, or use `/stair-dev:app share`.
 
 ### What do I need to keep safe?
 
@@ -64,15 +78,16 @@ At the start of a session it can show you one line from its makers, about a new 
 
 ### What isn't there yet?
 
-- Sharing: there is no way yet to give someone else, a person or an evaluator, access to your records.
+- Sharing your records: there is no way yet to give someone else, a person or an evaluator, access to them.
 - A backup command: copy the two key files yourself.
 - Permanence: this is an alpha. The service can change or be reset; you will be told before anything is deleted.
 
 ### Who runs it?
 
-Stair AI runs the server your records go to, `api.stair-ai.com` (the team's staging channel uses `stg-api.stair-ai.com`). Its software is open source (`StairAI/Reasoning-Ledger`), and this plugin's code is in its folder on your machine, for you or Claude to read.
+Stair AI runs the server your records go to, `api.stair-ai.com` (the team's staging channel uses `stg-api.stair-ai.com`). It also runs the apps, such as `share.stair-ai.com`. Its software is open source (`StairAI/Reasoning-Ledger`), and this plugin's code is in its folder on your machine, for you or Claude to read.
 
 ## Changes to this notice
 
+- `2026-11-11`: Stair's apps. An account given access (today, Stair's team) can publish a page with `/stair-dev:app share`; such a page is not encrypted and opens for anyone with its link. What is recorded for you, and how, is unchanged.
 - `2026-10-31`: rewritten as questions and answers with a short version first. New: why Stair keeps the record, leaving a project out, a preview of what is sent, choosing whether sessions that waited for a changed notice are sent, and the digest each encrypted text carries. What is recorded and sent is unchanged.
 - `2026-10-30.2`: fingerprints keyed with your key; the makers' notices no longer reach Claude; the viewer opens a limited, noted view instead of carrying your master key.

@@ -52,7 +52,7 @@ HOME = Path(os.environ.get("STAIR_HOME") or os.environ.get("RL_PLUGIN_HOME") or 
 BATCH = 25   # records per upload; with the longer read timeout below, a slow ledger no longer times a batch out
 # The privacy notice (PRIVACY.md beside this file) a person accepts at setup. Bumped whenever the notice changes in
 # substance; setup then asks again.
-PRIVACY_NOTICE_VERSION = "2026-10-31"
+PRIVACY_NOTICE_VERSION = "2026-11-11"
 # One queue per privacy notice: the hooks of this version append to queue/n-<its notice>/. A processor of an earlier version,
 # still running in a session opened before an update, takes only the queues it knows (versions before 0.15.0 the flat
 # queue/events.jsonl), so it cannot send a session recorded under a notice the person has not accepted yet.

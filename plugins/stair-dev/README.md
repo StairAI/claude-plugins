@@ -31,7 +31,7 @@ Claude installs the plugin, reads its code and says in three lines what it found
 
    ```bash
    "$HOME/.claude/plugins/cache/stair-ai/stair/$(ls ~/.claude/plugins/cache/stair-ai/stair | sort -V | tail -1)/bin/stair" link
-   stair rl setup --invite STAIR-XXXXX-XXXXX --accept-privacy-notice 2026-10-31
+   stair rl setup --invite STAIR-XXXXX-XXXXX --accept-privacy-notice 2026-11-11
    ```
 
    The setup builds the plugin's own Python environment (with `uv`, or Python 3.12+), creates your owner on the ledger with your invite code (anonymous: the keys are the identity; `--register you@example.com` registers with an e-mail instead, and `stair rl claim you@example.com` attaches one later), makes your content master key, registers this machine as an agent and sends one probe record (which carries the notice version you accepted). Two files come out of it, both readable by you only and never printed or sent:
@@ -45,7 +45,7 @@ Claude installs the plugin, reads its code and says in three lines what it found
 
 3. Start a new session (or `/reload-plugins`). From the next turn on, every turn of every session is recorded.
 
-The plugin has two slash commands, both started by the person: `/stair:install` (`commands/install.md`: a review of the plugin's own code, the notice's short version, one question, then the setup command) and `/stair:notice` (`commands/notice.md`: the notice's short version and what changed, then the choice to accept it, after the notice changed or any time). Claude is not asked to do anything else, ever: recording comes from the transcript and the hooks, not from the model, and a hook never has Claude ask for consent.
+The plugin has three slash commands, all started by the person: `/stair:install` (`commands/install.md`: a review of the plugin's own code, the notice's short version, one question, then the setup command), `/stair:notice` (`commands/notice.md`: the notice's short version and what changed, then the choice to accept it, after the notice changed or any time) and `/stair:app` (`commands/app.md`: the Stair apps the account may use, such as share for publishing a page; Claude reads the app's own documentation from its own address and makes only the requests the person asked for, with a token it never shows). For recording, Claude is not asked to do anything, ever: it comes from the transcript and the hooks, not from the model, and a hook never has Claude ask for consent.
 
 Leave a project out with `stair rl exclude <folder>` (the current folder by default): the hooks do not even queue the sessions that work there, and the processor, which checks again with links resolved, marks such a session so that nothing more of it is sent, even after `stair rl include <folder>` takes the folder back for new sessions. `stair rl preview` shows the last turn of the newest session as the ledger would get it, the readable shape of each record beside the encrypted objects that carry its words, built with this machine's keys and sent nowhere (`--json` for the records in full).
 
@@ -77,6 +77,7 @@ The owner key goes only to the ledger and its access gate. Other Stair services 
 |---|---|
 | `stair access token --resource https://share.stair-ai.com` | Print a token for one service, for a program to read (a skill's script); a cached token is reused while it has five minutes left, `--fresh` asks again |
 | `stair access me` | This account's owner id, handle and the services it may reach; send the owner id to the administrator to be given access |
+| `stair access apps [--json]` | The apps this account may use on this channel: the services granted to it whose own metadata (RFC 9728) names this channel's gate, each with its address and its documentation; one that names another gate is left out, with the reason. `/stair:app` reads it |
 | `stair access admin handle <owner> <handle>` | Operators: give an owner (id or e-mail) its handle; changing an existing one needs `--replace`, since links under it stop working |
 | `stair access admin grant <owner> <service> <scope>…` | Operators: let an owner reach a service, e.g. `grant colin@stair-ai.com https://share.stair-ai.com share:write`; `grants`, `revoke <id>` and `lookup` too. The administrator token comes from `--admin-token-file` or `STAIR_ADMIN_TOKEN` |
 
@@ -110,7 +111,7 @@ Rewind and fork of a conversation are represented, not erased: see `../LEDGER_GU
 
 ## Files
 
-- `hooks/hooks.json`, `bin/stair` (bash fast path + python entry), `rl_plugin.py` (processor, setup, status, flush, map, viewer, key, admin), `access.py` (`stair access`: tokens for other Stair services, handles and grants), `mapper.py` (transcript to records), `PRIVACY.md` (the notice setup asks you to accept; its "In short" section is what Claude shows as written), `commands/install.md` (`/stair:install`), `commands/notice.md` (`/stair:notice`).
+- `hooks/hooks.json`, `bin/stair` (bash fast path + python entry), `rl_plugin.py` (processor, setup, status, flush, map, viewer, key, admin), `access.py` (`stair access`: tokens for other Stair services, handles and grants), `mapper.py` (transcript to records), `PRIVACY.md` (the notice setup asks you to accept; its "In short" section is what Claude shows as written), `commands/install.md` (`/stair:install`), `commands/notice.md` (`/stair:notice`), `commands/app.md` (`/stair:app`).
 - `../LEDGER_GUIDE.md` (repository root) - the eleven behaviors, their fields, and the rules this plugin maps Claude Code's transcript by.
 - `experiment/` - the headless experiment and install-test runners; `tests/` - mapper rules on synthetic transcripts (turns, rewind, fork, plans, verification reads, questions, schema validity) and the setup, viewer, key and admin commands; `stair access` against a stand-in gate.
 
