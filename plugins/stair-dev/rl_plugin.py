@@ -44,6 +44,8 @@ NAME = plugin_name()
 CHANNEL = channel()
 # Which channel speaks, at the start of every line the person is shown: "Stair" (release) or "Stair staging", from channel.env.
 LABEL = CHANNEL.get("STAIR_LABEL") or ("Stair" if CHANNEL.get("STAIR_CHANNEL") == "release" else "Stair staging")
+# A message that tells the person what to run names this channel's own command, never the one of the channel beside it.
+NOT_CONFIGURED = "not configured: run `%s rl setup` first" % NAME
 # Each channel keeps its state under ~/.<name>: ~/.stair for the release channel, ~/.stair-dev for the source.
 # Run from anywhere but Claude Code's plugin cache (a source checkout, --plugin-dir), the state is kept apart: ~/.<name>-src.
 HOME = Path(os.environ.get("STAIR_HOME") or os.environ.get("RL_PLUGIN_HOME") or Path.home() / ("." + NAME + ("" if "/plugins/cache/" in str(HERE) else "-src")))
@@ -174,39 +176,51 @@ def client(cfg):
     return _client
 
 def upload(cfg, records):
-    """Upload records in batches; the SDK uploads raw content at content positions first. Returns (ok_ids, failed).
-    A batch answers per record (the server isolates failures inside a batch), so a record counts as uploaded only when its
-    own acknowledgement came back without an error code. A record whose upstream failed in this run is not sent at all:
-    the server would reject it for the missing upstream. It goes to the spool with that reason, and `stair rl flush` retries it
-    once the upstream is in."""
+    """Upload records in their order, in batches; the SDK uploads raw content at content positions first. Returns (ok_ids,
+    failed). An Attesting has a call of its own, so it goes between the batches of the records around it: what follows from
+    it never reaches the server first (sent after its batch, the record after a turn the person stopped was rejected for
+    its missing upstream, and took what followed with it). A batch answers per record (the server isolates failures inside
+    a batch), so a record counts as uploaded only when its own acknowledgement came back without an error code. A record
+    whose upstream failed in this run is not sent at all: the server would reject it for the missing upstream. It goes to
+    the spool with that reason, and `stair rl flush` retries it once the upstream is in."""
     c = client(cfg); ok = []; failed = []; bad = set()
     def fail(r, err):
         failed.append({"record": r, "error": str(err)[:300]}); bad.add(r["record_id"])
-    for i in range(0, len(records), BATCH):
-        chunk = []
-        for r in records[i:i + BATCH]:
+    def sendable(rs):   # held back: what follows from a record that failed before it was its turn
+        out = []
+        for r in rs:
             blocked = [u for u in (r.get("upstream_record_id") or []) if u in bad]
             if blocked: fail(r, f"upstream_failed: {blocked[0]}")
-            else: chunk.append(r)
-        attest = [r for r in chunk if r["behavior"] == "Attesting"]; others = [r for r in chunk if r["behavior"] != "Attesting"]
-        if others:
-            try:
-                ack = c._submit_batch(others)
-                results = [x for x in (ack.get("results") or []) if isinstance(x, dict)] if isinstance(ack, dict) else []
-                by_id = {x.get("record_id"): x for x in results}
-                for n, r in enumerate(others):
-                    res = by_id.get(r["record_id"]) or (results[n] if n < len(results) and not results[n].get("record_id") else None)
-                    if res is None: fail(r, "no_ack: the batch response did not mention this record")
-                    elif res.get("code"): fail(r, f"{res['code']}: {res.get('message', '')}")
-                    else: ok.append(r["record_id"])
-            except Exception as e:
-                log("upload", e)
-                for r in others:   # one by one, so a single bad record does not block the rest
-                    try: c._submit(r); ok.append(r["record_id"])
-                    except Exception as e2: fail(r, repr(e2))
-        for a in attest:
+            else: out.append(r)
+        return out
+    def send_batch(rs):
+        rs = sendable(rs)
+        if not rs: return
+        try:
+            ack = c._submit_batch(rs)
+            results = [x for x in (ack.get("results") or []) if isinstance(x, dict)] if isinstance(ack, dict) else []
+            by_id = {x.get("record_id"): x for x in results}
+            for n, r in enumerate(rs):
+                res = by_id.get(r["record_id"]) or (results[n] if n < len(results) and not results[n].get("record_id") else None)
+                if res is None: fail(r, "no_ack: the batch response did not mention this record")
+                elif res.get("code"): fail(r, f"{res['code']}: {res.get('message', '')}")
+                else: ok.append(r["record_id"])
+        except Exception as e:
+            log("upload", e)
+            for r in rs:   # one by one, so a single bad record does not block the rest
+                try: c._submit(r); ok.append(r["record_id"])
+                except Exception as e2: fail(r, repr(e2))
+    batch = []
+    for r in records:
+        if r["behavior"] != "Attesting":
+            batch.append(r)
+            if len(batch) == BATCH: send_batch(batch); batch = []
+            continue
+        send_batch(batch); batch = []
+        for a in sendable([r]):
             try: c._submit_attesting(a); ok.append(a["record_id"])
             except Exception as e2: fail(a, repr(e2))
+    send_batch(batch)
     return ok, failed
 
 # ---------------------------------------------------------------- state per transcript
@@ -253,7 +267,14 @@ def process_transcript(cfg, transcript, payload, st, dry=False):
     spawned = {r["child_session_id"]: r["record_id"] for r in records if r.get("behavior") == "Delegating" and r.get("child_session_id")}
     unmatched = [r for r in records if r.get("behavior") == "Delegating" and r.get("kind") == "spawn" and not r.get("child_session_id")
                  and r.get("delegate_agent_id") != "claude-code-session"]
+    # A sub-agent that is continued stops again, and each stop lists it; its transcript is one, mapped once, in the place of
+    # its first stop. Mapped at every stop, all its records went up twice, and its second stop took the call of the
+    # sub-agent matched by order after it.
+    subagents, seen = [], set()
     for sa in sorted(st.get("subagents", []), key=lambda x: x.get("ts") or 0):
+        if sa.get("agent_id") and sa["agent_id"] in seen: continue
+        seen.add(sa.get("agent_id")); subagents.append(sa)
+    for sa in subagents:
         atp = sa.get("agent_transcript_path"); prefix = "%s:sub:%s" % (conv, str(sa.get("agent_id") or "x")[:8])
         parent_ref = spawned.get(prefix)
         if not parent_ref and unmatched:
@@ -274,7 +295,7 @@ def process_transcript(cfg, transcript, payload, st, dry=False):
     if dry: return records, new, info
     ok, failed = upload(cfg, new) if new else ([], [])
     st["uploaded"] = sorted(done | set(ok)); st["last_processed"] = now_ms(); st["info"] = info; save_state(st)
-    spool(failed)
+    spool([dict(x, transcript=str(transcript)) for x in failed])
     return records, new, {**info, "uploaded": len(ok), "failed": len(failed)}
 
 def lasting(err):
@@ -284,9 +305,12 @@ def lasting(err):
     return e.startswith("ValidationError(") or (e.startswith("validation_failed:") and "upstream_record_id" not in e)
 
 def spool(failed):
-    """Keep what failed: to retry (spool.jsonl, `flush`), or aside when retrying cannot help (spool.invalid.jsonl)."""
+    """Keep what failed: to retry (spool.jsonl, `flush`), or aside when retrying cannot help (spool.invalid.jsonl). The log says
+    why, as the spool forgets it once a retry works: one line for the lot, because one failure takes the rest of its session with it."""
     if not failed: return
     HOME.mkdir(parents=True, exist_ok=True)
+    log("upload-failed", {"records": len(failed), "by_reason": dict(collections.Counter(str(x.get("error")).split(":")[0].split("(")[0] for x in failed)),
+                          "first": str(failed[0].get("error"))[:200]})
     for name, keep in (("spool.jsonl", False), ("spool.invalid.jsonl", True)):
         items = [x for x in failed if lasting(x.get("error")) == keep]
         if items:
@@ -350,11 +374,20 @@ def queued_lines():
             except OSError: pass
     return out
 
-def waiting_sessions():
-    """The sessions with something queued and not left out: while uploads are held for a notice, the ones that wait for the
-    person's choice."""
+def queued_sessions():
+    """The sessions with something queued and not left out."""
     queued = {(ev.get("payload") or {}).get("transcript_path") for ev in map(read_event, queued_lines()) if ev} - {None}
     return sorted(tp for tp in queued if not load_state(tp).get("excluded"))
+
+def waiting_sessions():
+    """The queued sessions that can still be sent: while uploads are held for a notice, the ones that wait for the person's
+    choice."""
+    return [tp for tp in queued_sessions() if os.path.exists(tp)]
+
+def unavailable_sessions():
+    """The queued sessions whose transcript has gone from this machine: nothing of them can be sent, so they do not count as
+    waiting."""
+    return [tp for tp in queued_sessions() if not os.path.exists(tp)]
 
 def process(args):
     cfg = load_config()
@@ -402,7 +435,9 @@ def drain(cfg, args):
                 _, new, info = process_transcript(cfg, tp, acts[tp], st)
                 summary.append({"transcript": tp, "new": len(new), **info})
             except Exception as e:
-                log("process", e); save_state(st)
+                if os.path.exists(tp): log("process", e)
+                else: summary.append({"transcript": tp, "new": 0, "gone": True})   # gone from this machine: nothing to send, and not a fault
+                save_state(st)
         if summary: print(json.dumps(summary, ensure_ascii=False))
         for part in parts:
             try: part.unlink()
@@ -625,13 +660,22 @@ def status(args):
                       "agent_id": cfg and cfg.get("agent_id"), "agent_name": cfg and cfg.get("agent_name"),
                       "transcripts": len(states), "records_uploaded": up, "queued_events": q, "spooled": sp, "set_aside": invalid, "home": str(HOME), "encryption": enc,
                       "privacy_notice": (cfg or {}).get("privacy_notice"), "privacy_notice_installed": PRIVACY_NOTICE_VERSION,
-                      "uploads_paused": bool(cfg) and bool(uploads_paused(cfg, fetch_notices(cfg, offline=True))), "waiting_sessions": len(waiting_sessions()),
+                      "uploads_paused": bool(cfg) and bool(uploads_paused(cfg, fetch_notices(cfg, offline=True))), "waiting_sessions": len(waiting_sessions()), "waiting_sessions_unavailable": len(unavailable_sessions()),
                       "excluded_folders": excluded_folders(), "owner": (cfg or {}).get("owner_email") or ("anonymous" if cfg else None),
                       "plugin": NAME + " " + plugin_version(), "channel": CHANNEL["STAIR_CHANNEL"], "notice_pending": NOTICE_PENDING.exists(),
                       "environment": environment, "command": command}))
     return 0
 
 SPOOL_RETRY_EVERY_MS = 10 * 60 * 1000
+
+def note_uploaded(came_from, ok):
+    """What a retry got through counts as uploaded in its session's state, as if the first try had worked: the count stays right
+    and the session's next turn does not send it again. The caller holds the lock."""
+    by_session = {}
+    for record_id in ok:
+        if came_from.get(record_id): by_session.setdefault(came_from[record_id], set()).add(record_id)
+    for tp, ids in by_session.items():
+        st = load_state(tp); st["uploaded"] = sorted(set(st.get("uploaded", [])) | ids); save_state(st)
 
 def resend_spool(cfg):
     """Send the spool again; the caller holds the lock. What a stopped run left (spool.flushing.jsonl) goes too; what the
@@ -642,13 +686,15 @@ def resend_spool(cfg):
         p.unlink()
     if not flushing.exists(): return [], []
     items = [json.loads(l) for l in open(flushing, encoding="utf-8") if l.strip()]
+    came_from = {x["record"]["record_id"]: x.get("transcript") for x in items}
     try:
         ok, failed = upload(cfg, [x["record"] for x in items])
     except Exception:
         with open(p, "a", encoding="utf-8") as f: f.write(open(flushing, encoding="utf-8").read())
         flushing.unlink()
         raise
-    spool(failed); flushing.unlink()
+    note_uploaded(came_from, ok)
+    spool([dict(x, transcript=came_from.get(x["record"]["record_id"])) for x in failed]); flushing.unlink()
     return ok, failed
 
 def retry_spool(cfg):
@@ -660,7 +706,9 @@ def retry_spool(cfg):
         if now_ms() - int(mark.read_text() or 0) < SPOOL_RETRY_EVERY_MS: return
     except Exception: pass
     mark.write_text(str(now_ms()))
-    try: resend_spool(cfg)
+    try:
+        ok, failed = resend_spool(cfg)
+        print(json.dumps({"spool_retry": {"sent": len(ok), "failed": len(failed)}}))
     except Exception as e: log("spool-retry", e)
 
 def flush(args):
@@ -782,7 +830,7 @@ def viewer(args):
     #, never sent to the server), and the grant is recorded in the ledger. The link is opened in this machine's browser, or
     printed when this runs in a person's own terminal; never printed for an assistant. --no-key: the structure only."""
     cfg = load_config()
-    if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
+    if not cfg: print(json.dumps({"ok": False, "error": NOT_CONFIGURED})); return 1
     if args.base and args.save:
         cfg["viewer_url"] = args.base.rstrip("/"); json.dump(cfg, open(HOME / "config.json", "w", encoding="utf-8"), indent=1)
     base = (args.base or cfg.get("viewer_url") or cfg["endpoint"]).rstrip("/")
@@ -817,7 +865,7 @@ def viewer(args):
 def grants_cmd(args):
     """`grants`: the view grants of this account, newest first, without keys."""
     cfg = load_config()
-    if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
+    if not cfg: print(json.dumps({"ok": False, "error": NOT_CONFIGURED})); return 1
     r = owner_request(cfg, "GET", "/v1/view-grants", missing_ok=True)
     print(json.dumps({"ok": r is not None, "grants": (r or {}).get("grants", []), **({} if r is not None else {"error": "this ledger has no view grants yet"})}))
     return 0 if r is not None else 1
@@ -825,7 +873,7 @@ def grants_cmd(args):
 def revoke_cmd(args):
     """`revoke GRANT_ID`: end a view grant now; the ledger drops its keys and signs out the browsers it opened."""
     cfg = load_config()
-    if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
+    if not cfg: print(json.dumps({"ok": False, "error": NOT_CONFIGURED})); return 1
     r = owner_request(cfg, "DELETE", "/v1/view-grants/" + args.grant_id)
     print(json.dumps({"ok": bool(r.get("revoked")), "grant_id": args.grant_id})); return 0
 
@@ -873,7 +921,7 @@ def account_machines(cfg):
 def claim(args):
     """`claim EMAIL`: give this anonymous owner an e-mail, so the account can be found again and, later, recovered."""
     cfg = load_config()
-    if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
+    if not cfg: print(json.dumps({"ok": False, "error": NOT_CONFIGURED})); return 1
     r = owner_request(cfg, "PATCH", "/v1/owners/me", {"email": args.email.strip()})
     cfg["owner_email"] = r.get("email") or args.email.strip(); json.dump(cfg, open(HOME / "config.json", "w", encoding="utf-8"), indent=1)
     print(json.dumps({"ok": True, "owner_id": r.get("owner_id"), "email": cfg["owner_email"]})); return 0
@@ -1054,18 +1102,19 @@ def skip_waiting():
         for part in parts:
             try: part.unlink()
             except FileNotFoundError: pass
-        return len(sessions)
     finally: lock.close()
 
 def accept_notice(args):
     """`accept-notice VERSION [--skip-waiting]`: the person read the current notice (its version must be the one installed) and
-    accepts it. The sessions that waited meanwhile are sent from now on, or, with --skip-waiting, left out for good."""
+    accepts it. The sessions that waited meanwhile are released, and go when the processor next runs (at the end of this turn),
+    or, with --skip-waiting, left out for good. Nothing is sent here, and the numbers say so."""
     cfg = load_config()
-    if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
+    if not cfg: print(json.dumps({"ok": False, "error": NOT_CONFIGURED})); return 1
     if args.version != PRIVACY_NOTICE_VERSION:
         print(json.dumps({"ok": False, "error": "the installed plugin's notice is %s, not %s; update the plugin first, then read its PRIVACY.md" % (PRIVACY_NOTICE_VERSION, args.version)})); return 1
-    waiting = len(waiting_sessions())
-    left_out = skip_waiting() if getattr(args, "skip_waiting", False) else 0
+    skip = getattr(args, "skip_waiting", False)
+    waiting = len(waiting_sessions()); unavailable = len(unavailable_sessions())
+    if skip: skip_waiting()
     cfg["privacy_notice"] = {"version": PRIVACY_NOTICE_VERSION, "accepted_at": now_ms()}
     json.dump(cfg, open(HOME / "config.json", "w", encoding="utf-8"), indent=1)
     for f in (HOME / NOTICE_LATER, HOME / NOTICE_REMINDED):   # the reminder's state is of the notice just accepted
@@ -1073,13 +1122,14 @@ def accept_notice(args):
         except FileNotFoundError: pass
     refresh_notices(cfg, force=True)
     print(json.dumps({"ok": True, "privacy_notice": cfg["privacy_notice"], "uploads_paused": False,
-                      "waiting_sessions_sent": waiting - left_out, "waiting_sessions_left_out": left_out})); return 0
+                      "waiting_sessions_released": 0 if skip else waiting, "waiting_sessions_left_out": waiting if skip else 0,
+                      "waiting_sessions_unavailable": unavailable})); return 0
 
 def notice_later(args):
     """`notice-later`: the person chose "Not now" in /stair:notice. Nothing changes but the reminder: no line about this
     notice at the start of a session for a week. Uploads stay held; /stair:notice brings them back to the choice any time."""
     cfg = load_config()
-    if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
+    if not cfg: print(json.dumps({"ok": False, "error": NOT_CONFIGURED})); return 1
     paused = uploads_paused(cfg, fetch_notices(cfg, offline=True))
     if not paused: print(json.dumps({"ok": True, "uploads_paused": False})); return 0
     until = int(time.time()) + LATER_SECONDS
@@ -1201,8 +1251,8 @@ def preview(args):
     rest = collections.Counter(r["behavior"] for r, _ in planned[SHOWN_RECORDS:])
     if rest: print("  … and %d more like these: %s" % (sum(rest.values()), ", ".join("%d %s" % (n, b) for b, n in rest.most_common())))
     parts = [d for _, ups in planned for _, d in ups]
-    print("\n%d records, %d %s parts (%d bytes). `stair rl preview --json` shows the records in full, as they would be sent."
-          % (len(planned), len(parts), "plain" if clear else "encrypted", sum(len(d) for d in parts)))
+    print("\n%d records, %d %s parts (%d bytes). `%s rl preview --json` shows the records in full, as they would be sent."
+          % (len(planned), len(parts), "plain" if clear else "encrypted", sum(len(d) for d in parts), NAME))
     return 0
 
 def key_cmd(args):
@@ -1210,7 +1260,7 @@ def key_cmd(args):
     key, wrapped with the new one and registered again under the same id; then the new key replaces the file (the old one
     stays as master.key.old until you delete it). `key id` prints the current key's id."""
     cfg = load_config()
-    if not cfg or not master_key_path(cfg): print(json.dumps({"ok": False, "error": "no content master key: run `stair rl setup` first"})); return 1
+    if not cfg or not master_key_path(cfg): print(json.dumps({"ok": False, "error": "no content master key: run `%s rl setup` first" % NAME})); return 1
     use_sdk_src(cfg)
     from reasoning_ledger import ContentEncryption, generate_master_key, load_master_key, master_key_id, save_master_key
     path = master_key_path(cfg); old = load_master_key(path)
@@ -1276,7 +1326,7 @@ def map_cmd(args):
     return 0
 
 def main():
-    ap = argparse.ArgumentParser(prog="stair rl"); sub = ap.add_subparsers(dest="cmd")
+    ap = argparse.ArgumentParser(prog=NAME + " rl"); sub = ap.add_subparsers(dest="cmd")
     p = sub.add_parser("process"); p.add_argument("--delay", type=float, default=1.5)
     s = sub.add_parser("setup"); s.add_argument("--endpoint", default=CHANNEL["STAIR_DEFAULT_ENDPOINT"], help="the ledger to write to (default: this channel's, %s)" % CHANNEL["STAIR_DEFAULT_ENDPOINT"]); s.add_argument("--agent-name", default=None, help="a short name for this machine, stored as it is and readable on the ledger (default for a new account: %s; reconnecting, setup keeps the earlier one)" % default_agent_name())
     s.add_argument("--api-key-file", default=None, help="file holding the owner key you were given")

@@ -33,7 +33,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from rl_plugin import CHANNEL, HOME, USER_AGENT, api_key, load_config  # noqa: E402
+from rl_plugin import CHANNEL, HOME, NAME, USER_AGENT, api_key, load_config  # noqa: E402
 
 CACHE = HOME / "access.json"
 TOKEN_EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange"
@@ -96,7 +96,7 @@ def problem(body):
 def account():
     cfg = load_config()
     if not cfg:
-        raise AccessError("this machine has no Stair account yet; run `stair rl setup` first")
+        raise AccessError("this machine has no Stair account yet; run `%s rl setup` first" % NAME)
     key = api_key(cfg)
     if not key:
         raise AccessError("no owner key on this machine (config.json names none, and STAIR_API_KEY is unset)")
@@ -179,8 +179,8 @@ def token(resource, scope=None, fresh=False):
     if status != 200 or not isinstance(body, dict) or not body.get("access_token"):
         error = body.get("error") if isinstance(body, dict) else None
         if error == "invalid_target":
-            raise AccessError("%s. Access is given by the Stair administrator; `stair access me` shows the owner id to "
-                              "send them" % problem(body).rstrip("."))
+            raise AccessError("%s. Access is given by the Stair administrator; `%s access me` shows the owner id to "
+                              "send them" % (problem(body).rstrip("."), NAME))
         if error == "invalid_request" and "subject_token" in problem(body):
             raise AccessError("the gate does not accept this machine's owner key (%s)" % problem(body))
         raise AccessError("the gate refused (%s): %s" % (error or status, problem(body)))
@@ -288,7 +288,7 @@ def admin(args):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="stair access",
+    parser = argparse.ArgumentParser(prog=NAME + " access",
                                      description="The account's key and the Stair services it reaches.")
     commands = parser.add_subparsers(dest="cmd")
     t = commands.add_parser("token", help="print a short-lived access token for one service, for a program to read")

@@ -1,7 +1,7 @@
 {
   "_about": "What the plugin's makers want people to know. The plugin fetches this file at most hourly and says what applies at the start of the next session; the person decides. latest_version and changes (from claude-code/CHANGES.md) are filled by publish.sh for the channel it publishes: stair on main, stair-dev on staging; each channel reads its own branch's copy. A notice: {id, kind: update|privacy|info, title, text, until?: YYYY-MM-DD, channel?: release|dev, privacy_notice_version?: for kind privacy}.",
   "latest_version": {
-    "stair-dev": "0.15.1"
+    "stair-dev": "0.15.2"
   },
   "notices": [
     {
@@ -9,38 +9,51 @@
       "kind": "privacy",
       "privacy_notice_version": "2026-10-30.2",
       "title": "Privacy notice 2026-10-30.2",
-      "text": "Fingerprints are now keyed, the makers' notices no longer reach Claude, the machine name is said to be readable, the viewer opens a limited, recorded grant instead of carrying your master key, and the notice says where that protection ends. Update the plugin, then type /stair:notice in a new session."
+      "text": "Fingerprints are now keyed, the makers' notices no longer reach Claude, the machine name is said to be readable, the viewer opens a limited, recorded grant instead of carrying your master key, and the notice says where that protection ends. Update the plugin, then type /stair-dev:notice in a new session."
     },
     {
-      "id": "changes:0.15.1",
+      "id": "changes:0.15.2",
       "kind": "changes",
-      "title": "What's new in stair-dev 0.15.1",
-      "text": "Stair's one line at the start of a session comes less often and says which channel it is from. Details: https://github.com/StairAI/claude-plugins/blob/staging/plugins/stair-dev/CHANGES.md"
+      "title": "What's new in stair-dev 0.15.2",
+      "text": "/stair-dev:notice counts only the sessions that can still be sent and no longer says they were sent before they are; uploads keep the order things happened in. Details: https://github.com/StairAI/claude-plugins/blob/staging/plugins/stair-dev/CHANGES.md"
     }
   ],
   "changes": [
+    {
+      "version": "0.15.2",
+      "summary": "/stair-dev:notice counts only the sessions that can still be sent and no longer says they were sent before they are; uploads keep the order things happened in.",
+      "you_do": [],
+      "items": [
+        "The number of waiting sessions leaves out any whose record has gone from this machine. If there are some, you are told how many could not be sent.",
+        "After you accept, Claude says the waiting sessions start uploading when the turn ends and go on in the background; a long history can take hours.",
+        "A record that got through only on a retry now counts as uploaded, so the total in `stair-dev rl status` is right and the session does not send it again.",
+        "Records go up in the order they happened. After you stopped a turn, the records that followed were refused on the first try and waited for the retry ten minutes later; now they go through at once.",
+        "A sub-agent that was continued, and so finished twice, is recorded once: its records no longer go up twice, and a sub-agent started after it keeps the link to the call that started it.",
+        "On the staging channel, the commands, the privacy notice and the plugin's messages give the staging plugin's own command, slash commands and folder, so following them no longer acts on the release installed beside it."
+      ]
+    },
     {
       "version": "0.15.1",
       "summary": "Stair's one line at the start of a session comes less often and says which channel it is from.",
       "you_do": [],
       "items": [
         "The line is shown only when you start a new session, not when one resumes, is cleared, is compacted or is forked.",
-        "The reminder that the privacy notice changed comes at most once a day. Choose \"Not now\" in /stair:notice and it stays quiet for a week; nothing is sent meanwhile.",
-        "The line starts with the channel: \"Stair\" for the release, \"Stair staging\" for the staging channel. It now reads: \"the privacy notice was updated. Your sessions stay on this machine until you choose — type /stair:notice.\"",
-        "When the question box cannot be shown, /stair:notice asks the same question in plain text."
+        "The reminder that the privacy notice changed comes at most once a day. Choose \"Not now\" in /stair-dev:notice and it stays quiet for a week; nothing is sent meanwhile.",
+        "The line starts with the channel: \"Stair\" for the release, \"Stair staging\" for the staging channel. It now reads: \"the privacy notice was updated. Your sessions stay on this machine until you choose — type /stair-dev:notice.\"",
+        "When the question box cannot be shown, /stair-dev:notice asks the same question in plain text."
       ]
     },
     {
       "version": "0.15.0",
       "summary": "Setting up Stair is shorter, and calmer: Claude reads the plugin's code and says in three lines what it found, shows you a short notice as written and asks one question.",
       "you_do": [
-        "after the update, type /stair:notice once to read the short notice and accept it. Until then nothing is sent; the sessions in between wait on this machine, and you choose whether they are sent."
+        "after the update, type /stair-dev:notice once to read the short notice and accept it. Until then nothing is sent; the sessions in between wait on this machine, and you choose whether they are sent."
       ],
       "items": [
         "Privacy: the notice is rewritten (version 2026-10-31) as questions and answers with a short version first. It now says why Stair keeps the record, and that each encrypted text carries a digest that a very short text can be guessed from. What is recorded and sent is unchanged.",
-        "Leave a project out with `stair rl exclude <folder>`: sessions that work there are not recorded from then on.",
-        "See what would be sent for your last turn, without sending it: `stair rl preview`.",
-        "A changed notice no longer has Claude ask for your consent: the plugin tells you in one line, and you choose by typing /stair:notice.",
+        "Leave a project out with `stair-dev rl exclude <folder>`: sessions that work there are not recorded from then on.",
+        "See what would be sent for your last turn, without sending it: `stair-dev rl preview`.",
+        "A changed notice no longer has Claude ask for your consent: the plugin tells you in one line, and you choose by typing /stair-dev:notice.",
         "A new account names this machine after its kind (claude-code-mac, say) instead of asking, and the machine's id is sent as a fingerprint made with your key."
       ]
     },
@@ -49,15 +62,15 @@
       "summary": "Installing Stair again gets your account back: the same records, no invite code, from the keys on this machine or the ones you kept.",
       "you_do": [],
       "items": [
-        "An uninstall leaves your keys in `~/.stair`, and setup now reconnects that account by itself, keeping this machine's earlier name; `/stair:install` checks for them first.",
-        "Keys you kept elsewhere come back with `stair rl setup --restore <folder>`, the folder that holds `owner.key` and `master.key`. Claude asks where the folder is, never for the keys.",
+        "An uninstall leaves your keys in `~/.stair-dev`, and setup now reconnects that account by itself, keeping this machine's earlier name; `/stair-dev:install` checks for them first.",
+        "Keys you kept elsewhere come back with `stair-dev rl setup --restore <folder>`, the folder that holds `owner.key` and `master.key`. Claude asks where the folder is, never for the keys.",
         "Before writing anything, setup checks with the ledger that your keys are the right ones: when the master key here cannot open your earlier sessions, it stops and says so instead of quietly making a new one.",
         "A key is never deleted: one that is replaced is moved aside as `<name>.replaced-<time>`."
       ]
     },
     {
       "version": "0.13.1",
-      "summary": "`stair access` now says plainly when your ledger does not run the Stair gate yet, where before it stopped with an error trace.",
+      "summary": "`stair-dev access` now says plainly when your ledger does not run the Stair gate yet, where before it stopped with an error trace.",
       "you_do": [],
       "items": [
         "An older ledger answers the gate's address with its sign-in page; the plugin now reads that as no gate, and any other answer that is not JSON as a one-line error."
@@ -68,8 +81,8 @@
       "summary": "Your account can now reach other Stair services, the first being the team's page sharing at share.stair-ai.com.",
       "you_do": [],
       "items": [
-        "`stair access token --resource <address>` gives a skill a short-lived token for that one service. Your keys stay on this machine and go only to the Stair gate; the service never sees them.",
-        "`stair access me` shows your handle and the services your account may reach. Who may use which service is set by the Stair operator."
+        "`stair-dev access token --resource <address>` gives a skill a short-lived token for that one service. Your keys stay on this machine and go only to the Stair gate; the service never sees them.",
+        "`stair-dev access me` shows your handle and the services your account may reach. Who may use which service is set by the Stair operator."
       ]
     },
     {
@@ -87,7 +100,7 @@
       "you_do": [],
       "items": [
         "Privacy: when the plugin's own privacy notice is newer than the one you accepted, recording pauses, and every session says so from its first turn until you accept it, without the network.",
-        "`stair rl flush` sends nothing while recording is paused, and when the ledger cannot be reached it keeps everything to retry; `stair rl status` counts it."
+        "`stair-dev rl flush` sends nothing while recording is paused, and when the ledger cannot be reached it keeps everything to retry; `stair-dev rl status` counts it."
       ]
     },
     {
@@ -96,7 +109,7 @@
       "you_do": [],
       "items": [
         "With several Claude Code sessions open, the uploads after each turn no longer run over one another: one at a time takes the queue, moving it aside first, so an event that arrives meanwhile waits for the next round instead of being lost.",
-        "A record the ledger's rules rule out is set aside (`spool.invalid.jsonl`, counted in `stair rl status`) instead of being retried forever.",
+        "A record the ledger's rules rule out is set aside (`spool.invalid.jsonl`, counted in `stair-dev rl status`) instead of being retried forever.",
         "The plugin run from its source directory keeps its state apart (`~/.stair-dev-src`), so a development copy never shares a queue with the installed plugin."
       ]
     },
@@ -109,10 +122,10 @@
       "items": [
         "Privacy: a message sent to another session or agent no longer writes the recipient's name, often a session's title, where the ledger can read it; only a keyed fingerprint of it.",
         "Privacy: the privacy notice is now version 2026-10-30.2. It adds that an assistant able to act in your browser can see what you open there. Recording pauses until you accept it.",
-        "Privacy: records uploaded before 0.11.2 keep their plain fingerprints, since the ledger never rewrites a record. Fingerprints follow the master key, so after `stair rl key rotate` new records no longer match older ones.",
+        "Privacy: records uploaded before 0.11.2 keep their plain fingerprints, since the ledger never rewrites a record. Fingerprints follow the master key, so after `stair-dev rl key rotate` new records no longer match older ones.",
         "After an update, the first session shows what the previous version left to say, such as a changed privacy notice, instead of skipping it.",
         "On Linux the viewer opens a browser only when you run it yourself; run by an assistant, it says to run it in your own terminal.",
-        "`stair rl status` calls the SDK's own version number `sdk_package_version`, beside the pin that chose it (`sdk`)."
+        "`stair-dev rl status` calls the SDK's own version number `sdk_package_version`, beside the pin that chose it (`sdk`)."
       ]
     },
     {
@@ -122,10 +135,10 @@
         "after updating, accept the privacy notice; Claude reads it to you and asks."
       ],
       "items": [
-        "Privacy: `stair rl viewer` no longer puts your master key in the link. It grants a view of your sessions of the last seven days for an hour (`--days`, `--hours`): their keys are wrapped again here under a fresh key that only the link carries, and the grant is recorded in your ledger. When it ends, the ledger drops those keys and the link opens nothing.",
-        "Privacy: Claude is never shown the link's key. The plugin opens the link in your browser, or prints it only in a terminal of your own; when Claude Code runs on another machine, run `stair rl viewer` in a terminal there.",
+        "Privacy: `stair-dev rl viewer` no longer puts your master key in the link. It grants a view of your sessions of the last seven days for an hour (`--days`, `--hours`): their keys are wrapped again here under a fresh key that only the link carries, and the grant is recorded in your ledger. When it ends, the ledger drops those keys and the link opens nothing.",
+        "Privacy: Claude is never shown the link's key. The plugin opens the link in your browser, or prints it only in a terminal of your own; when Claude Code runs on another machine, run `stair-dev rl viewer` in a terminal there.",
         "Privacy: the privacy notice is now version 2026-10-30.1, describing the viewer as it now works. Recording pauses until you accept it.",
-        "`stair rl grants` lists your grants; `stair rl revoke <grant>` ends one now."
+        "`stair-dev rl grants` lists your grants; `stair-dev rl revoke <grant>` ends one now."
       ]
     },
     {
@@ -140,17 +153,6 @@
         "Privacy: the privacy notice is now version 2026-10-30. It describes the two changes above, says that the name you give this machine is readable on the ledger, and says plainly how the viewer works today. Recording pauses until you accept it.",
         "A notice left by the version you updated from is no longer shown after the update.",
         "Uploads wait longer for a slow ledger and go in smaller batches, so they no longer time out."
-      ]
-    },
-    {
-      "version": "0.11.1",
-      "summary": "Updating is one step now: the plugin, the `stair` command and the plugin's Python environment move to the new version together.",
-      "you_do": [],
-      "items": [
-        "The `stair` command runs whichever version Claude Code has installed, so it no longer stays on an old one after an update. A command set up by an earlier version is switched over at the start of your next session.",
-        "When a version needs a newer ledger SDK, the plugin builds a fresh Python environment for it in the background, once, and removes the old one.",
-        "On macOS, recording now reaches the ledger: before, the upload after each turn did not start there, and the queued events could not be read. What waited on the machine is uploaded after your next turn.",
-        "The update notice says what changed, and Claude can tell you more when you ask."
       ]
     }
   ]
