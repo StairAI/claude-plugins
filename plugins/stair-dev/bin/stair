@@ -6,8 +6,9 @@
 #                        skill's script), me, admin (handles and grants). Plain python3 is enough: no SDK needed.
 #   stair hook <Event>   fast path, bash only: append the hook's JSON to the local queue (one per privacy notice), unless its
 #                        folder is left out; on Stop/SessionEnd start the detached processor (which maps the transcript and
-#                        uploads). Never blocks Claude Code for long. A version whose environment is gone (a session
-#                        opened before an update) hands the hook to the version installed now.
+#                        uploads). Never blocks Claude Code for long. A version that is no longer the one installed (a
+#                        session opened before an update) hands the hook to the version installed now, which tells Claude,
+#                        once, that only the person can switch the session over (/reload-plugins).
 #   stair env            build the plugin's own Python environment with the ledger SDK in it (one per SDK version), and
 #                        remove those that another SDK's environment replaced more than a week ago.
 #   stair link [dir]     put the command on PATH (~/.local/bin/<name>): a small script that always runs the version
@@ -146,6 +147,37 @@ fi
 notice_of() {   # the privacy notice of the plugin version in directory $1
   sed -n '/^PRIVACY_NOTICE_VERSION = /{s/^PRIVACY_NOTICE_VERSION = "\([0-9][0-9.-]*\)".*/\1/p;q;}' "$1/rl_plugin.py" 2>/dev/null
 }
+version_of() {   # the version of the plugin in directory $1, as its plugin.json gives it
+  sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$1/.claude-plugin/plugin.json" 2>/dev/null | head -n 1 | tr -cd '0-9A-Za-z.+-'
+}
+accepted_notice() {   # the privacy notice the person accepted, from config.json
+  tr -d '\n' < "$HOME_DIR/config.json" 2>/dev/null | sed -n 's/.*"privacy_notice": *{[^}]*"version": *"\([^"]*\)".*/\1/p' | tr -cd '0-9.-'
+}
+switch_fact() {   # what Claude is told in a session that still runs version $1 while this one is installed: facts only
+  printf 'This session still runs %s %s, the version it started with; %s %s is installed now, and the hooks of this session already hand what it records to it. Its commands switch only when the person types /reload-plugins in the prompt box: only they can, and it is not available over Remote Control or on the phone, where starting a new session does the same.' \
+    "$NAME" "$1" "$NAME" "$(version_of "$ROOT")"
+}
+ask_reload() {   # a Stop hook handed over by the version a session opened before an update runs ($PAYLOAD, $HANDED_FROM): once
+  # per session and version, Claude is told what only the person can do and asks them in one line. Not while Claude is
+  # already continuing for a stop hook; nothing more when its last answer asked for the reload already, unless a changed
+  # notice is still to be said. The words are built here from version numbers; nothing in them comes from the network.
+  local sid mark asked=0 held=0 text
+  sid="$(printf '%s' "$PAYLOAD" | grep -o '"session_id" *: *"[A-Za-z0-9_-]*"' | head -n 1 | sed 's/.*"\([A-Za-z0-9_-]*\)"$/\1/')"
+  [ -n "$sid" ] || return 0
+  printf '%s' "$PAYLOAD" | grep -q '"stop_hook_active" *: *true' && return 0
+  mark="$HOME_DIR/reload.told/$sid-$(version_of "$ROOT")"
+  [ -e "$mark" ] && return 0
+  mkdir -p "$HOME_DIR/reload.told" 2>/dev/null || return 0
+  find "$HOME_DIR/reload.told" -type f -mtime +7 -exec rm -f {} + 2>/dev/null   # sessions told over a week ago
+  : > "$mark" 2>/dev/null || return 0
+  printf '%s' "$PAYLOAD" | grep -o -E '"last_assistant_message" *: *"([^"\\]|\\.)*"' | grep -q 'reload-plugins' && asked=1
+  [ -n "$notice" ] && older "$(accepted_notice)" "$notice" && held=1
+  [ "$asked" = 1 ] && [ "$held" = 0 ] && return 0
+  text="Stair plugin ($NAME): $(switch_fact "$(version_of "$HANDED_FROM")")"
+  [ "$asked" = 0 ] && text="$text Ask them in one line to type it, as the next step of your plan."
+  [ "$held" = 1 ] && text="$text Uploads are held until the person accepts privacy notice $notice, which they do themselves by typing /$NAME:notice in a session that runs the new version: say so in the same line; do not ask for their consent or run anything for it yourself."
+  printf '{"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": "%s"}}\n' "$text"
+}
 older() {   # is notice $1 older than notice $2? by date, then by the number after the dot (2026-10-30.10 after .2)
   local d1="${1%%.*}" d2="${2%%.*}" n1 n2
   n1="${1#"$d1"}"; n1="${n1#.}"; n2="${2#"$d2"}"; n2="${n2#.}"
@@ -157,18 +189,23 @@ if [ "${1:-}" = "hook" ]; then
   EVENT="${2:-unknown}"
   [ -f "$HOME_DIR/config.json" ] || exit 0          # not set up: do nothing, never break the session
   notice="$(notice_of "$ROOT")"                      # this version's notice
-  # No environment for this version's SDK: a session opened before an update, whose environment was removed since. The
-  # version installed now takes the hook as it came (the same arguments, the hook's JSON still unread on stdin), so that
-  # no environment is built again for a version that new sessions no longer run. Not to a version whose notice is older
-  # than this one's: what is recorded under a notice is never left to the processor of an earlier one. Once at most.
-  if [ -z "$PY" ] && [ -z "$HANDED_FROM" ]; then
+  # A session opened before an update runs the version it started with until the person types /reload-plugins. Its hooks
+  # go to the version installed now, as they came (the same arguments, the hook's JSON still unread on stdin): what the
+  # session records from then on is that version's to send, under its notice (held until the person accepts it, if it
+  # changed), no environment is built again for a version new sessions no longer run, and that version tells Claude, once,
+  # that only the person can switch the session over (ask_reload). Only an installed copy hands over, never a source
+  # checkout. Not to a version whose notice is older than this one's: what is recorded under a notice is never left to the
+  # processor of an earlier one. Once at most. (Before 0.16.1, only a version whose environment was gone handed over.)
+  if [ -z "$HANDED_FROM" ] && [ -z "$SRC_SUFFIX" ]; then
     inst="$(installed_root)"
     if [ -n "$inst" ] && [ -x "$inst/bin/stair" ] && [ "$(cd "$inst" 2>/dev/null && pwd -P)" != "$(cd "$ROOT" 2>/dev/null && pwd -P)" ]; then
       theirs="$(notice_of "$inst")"
       if [ -n "$theirs" ] && ! older "$theirs" "$notice"; then
-        mkdir -p "$HOME_DIR/logs" 2>/dev/null
-        printf '%s stair: %s has no environment for its SDK; its %s hook goes to %s, the version installed now\n' \
-          "$(date '+%Y-%m-%dT%H:%M:%S')" "$ROOT" "$EVENT" "$inst" >> "$HOME_DIR/logs/process.log" 2>/dev/null
+        case "$EVENT" in Stop|SessionEnd)            # once a turn: the log says why this version's processor no longer runs
+          mkdir -p "$HOME_DIR/logs" 2>/dev/null
+          printf '%s stair: %s is not the version installed now; its %s hook goes to %s\n' \
+            "$(date '+%Y-%m-%dT%H:%M:%S')" "$ROOT" "$EVENT" "$inst" >> "$HOME_DIR/logs/process.log" 2>/dev/null ;;
+        esac
         shopt -s execfail                            # if it cannot be run after all, this version goes on by itself
         CLAUDE_PLUGIN_ROOT="$inst" STAIR_HANDED_FROM="$ROOT" exec "$inst/bin/stair" "$@"
         shopt -u execfail
@@ -212,7 +249,7 @@ if [ "${1:-}" = "hook" ]; then
     # without the network or Python. Claude is told the fact at every start and never asked to seek consent (a hook that
     # did would look like an injected prompt); the person is told at a new session, at most once a day, and not for a
     # week after choosing "Not now" in /<name>:notice.
-    accepted="$(tr -d '\n' < "$HOME_DIR/config.json" 2>/dev/null | sed -n 's/.*"privacy_notice": *{[^}]*"version": *"\([^"]*\)".*/\1/p')"
+    accepted="$(accepted_notice)"
     due() {   # may the person be reminded of notice $1 now? Not within a day of the last reminder of it, nor before the
       local now v t; now="$(date +%s)"   # end of the week they asked for with "Not now"
       v=""; t=""; [ -f "$HOME_DIR/notice.later" ] && read -r v t < "$HOME_DIR/notice.later"
@@ -236,6 +273,8 @@ if [ "${1:-}" = "hook" ]; then
         printf '%s %s\n' "$held" "$(date +%s)" > "$HOME_DIR/notice.reminded" 2>/dev/null
       fi
     fi
+    # A session opened before an update, resumed, cleared or compacted since: Claude is told which version it runs.
+    if [ -n "$HANDED_FROM" ]; then ctx="$(switch_fact "$(version_of "$HANDED_FROM")")${ctx:+$NL$ctx}"; fi
     [ -n "$line$ctx" ] || exit 0
     ctx="Stair plugin ($NAME) notices for this machine. Ask before running anything.${ctx:+$NL$ctx}"
     if [ -n "$line" ]; then printf '{"systemMessage": "%s", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "%s"}}\n' "$line" "$ctx"
@@ -263,8 +302,12 @@ if [ "${1:-}" = "hook" ]; then
         else detach "$ROOT/bin/stair" rl process; fi                  # no environment for this SDK yet: the launcher builds it first
       fi ;;
   esac
+  if [ "$EVENT" = Stop ] && [ -n "$HANDED_FROM" ]; then ask_reload; fi   # a session that still runs an earlier version
   exit 0
 fi
+# The version Claude Code has installed now: `rl status` and `access apps` say when a session runs another one, so that the
+# commands can ask the person to switch it over first.
+export STAIR_INSTALLED_ROOT="$(installed_root)"
 if [ "${1:-}" = "env" ]; then build_env; exit $?; fi
 if [ "${1:-}" = "access" ]; then
   shift

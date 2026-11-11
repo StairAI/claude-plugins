@@ -52,7 +52,7 @@ HOME = Path(os.environ.get("STAIR_HOME") or os.environ.get("RL_PLUGIN_HOME") or 
 BATCH = 25   # records per upload; with the longer read timeout below, a slow ledger no longer times a batch out
 # The privacy notice (PRIVACY.md beside this file) a person accepts at setup. Bumped whenever the notice changes in
 # substance; setup then asks again.
-PRIVACY_NOTICE_VERSION = "2026-11-11"
+PRIVACY_NOTICE_VERSION = "2026-11-12"
 # One queue per privacy notice: the hooks of this version append to queue/n-<its notice>/. A processor of an earlier version,
 # still running in a session opened before an update, takes only the queues it knows (versions before 0.15.0 the flat
 # queue/events.jsonl), so it cannot send a session recorded under a notice the person has not accepted yet.
@@ -62,6 +62,17 @@ EXCLUDE = HOME / "exclude"   # folders left out, one per line: the hooks skip th
 def plugin_version():
     try: return json.load(open(HERE / ".claude-plugin" / "plugin.json", encoding="utf-8")).get("version") or "0"
     except Exception: return "0"
+
+def installed_now():
+    """The version Claude Code has installed now, when this copy is an installed one and that is another: a session opened
+    before an update runs the version it started with, commands included, until the person types /reload-plugins. The
+    launcher finds the installed directory (STAIR_INSTALLED_ROOT). None when this is it, when nothing says, or from source."""
+    other = os.environ.get("STAIR_INSTALLED_ROOT") or ""
+    if not other or "/plugins/cache/" not in str(HERE): return None
+    try:
+        if Path(other).resolve() == HERE: return None
+        return str(json.load(open(Path(other) / ".claude-plugin" / "plugin.json", encoding="utf-8")).get("version") or "") or None
+    except Exception: return None
 
 # urllib's default User-Agent (Python-urllib/x.y) is refused by the browser-integrity check of the CDN in front of the hosted
 # ledger (Cloudflare error 1010), so the two direct requests below name the plugin instead. The SDK (httpx) names itself.
@@ -342,12 +353,13 @@ def queue_dirs():
     if QUEUE.parent not in out: out.append(QUEUE.parent)
     return [d for d in out if d.is_dir()]
 
-def take_queue():
-    """Move each queue aside, then read it: a hook that appends meanwhile starts a fresh queue, so no event is lost. Parts left
-    by a run that stopped halfway are read again (records are idempotent on the ledger)."""
+def take_queue(dirs=None):
+    """Move each queue aside (of dirs, all this version takes by default), then read it: a hook that appends meanwhile starts
+    a fresh queue, so no event is lost. Parts left by a run that stopped halfway are read again (records are idempotent on
+    the ledger)."""
     QUEUE.parent.mkdir(parents=True, exist_ok=True)
     parts = []
-    for d in queue_dirs():
+    for d in (queue_dirs() if dirs is None else dirs):
         found = sorted(d.glob("events.*.taken")); q = d / "events.jsonl"
         if q.exists():
             taken = d / ("events.%d.%d.taken" % (now_ms(), os.getpid())); os.replace(q, taken); found.append(taken)
@@ -365,29 +377,69 @@ def read_event(line):
     try: return json.loads(line)
     except Exception: return repair_event_line(line)
 
-def queued_lines():
-    """Every queued event line, left where it is (for counting)."""
+def queued_lines(dirs=None):
+    """Every queued event line (of dirs, all queues by default), left where it is (for counting)."""
     out = []
-    for d in queue_dirs():
+    for d in (queue_dirs() if dirs is None else dirs):
         for f in [d / "events.jsonl"] + sorted(d.glob("events.*.taken")):
             try: out += [l for l in open(f, encoding="utf-8") if l.strip()]
             except OSError: pass
     return out
 
-def queued_sessions():
-    """The sessions with something queued and not left out."""
-    queued = {(ev.get("payload") or {}).get("transcript_path") for ev in map(read_event, queued_lines()) if ev} - {None}
+def queued_sessions(dirs=None):
+    """The sessions with something queued (in dirs, all queues by default) and not left out."""
+    queued = {(ev.get("payload") or {}).get("transcript_path") for ev in map(read_event, queued_lines(dirs)) if ev} - {None}
     return sorted(tp for tp in queued if not load_state(tp).get("excluded"))
 
-def waiting_sessions():
-    """The queued sessions that can still be sent: while uploads are held for a notice, the ones that wait for the person's
-    choice."""
-    return [tp for tp in queued_sessions() if os.path.exists(tp)]
+def accepted_notice(cfg):
+    return ((cfg or {}).get("privacy_notice") or {}).get("version") or ""
 
-def unavailable_sessions():
-    """The queued sessions whose transcript has gone from this machine: nothing of them can be sent, so they do not count as
-    waiting."""
-    return [tp for tp in queued_sessions() if not os.path.exists(tp)]
+def held_queue_dirs(cfg):
+    """The queues of notices newer than the one the person accepted. What was recorded there waits for their choice; the flat
+    queue and those of notices they accepted hold what was recorded under those, which is sent once uploads resume, whatever
+    they choose."""
+    accepted = accepted_notice(cfg)
+    return [d for d in queue_dirs() if d.name.startswith("n-") and notice_key(d.name[2:]) > notice_key(accepted)]
+
+def this_session():
+    """The transcript of the session a command runs in, from the id Claude Code gives the commands it runs; None elsewhere."""
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", sid): return None
+    found = sorted(claude_projects().glob("*/%s.jsonl" % sid))
+    return str(found[0]) if found else None
+
+def last_cwd(tp):
+    """Where the session worked last, from the end of its transcript."""
+    try:
+        with open(tp, "rb") as f:
+            f.seek(0, 2); f.seek(max(0, f.tell() - 65536)); tail = f.read().decode("utf-8", "replace")
+    except OSError: return None
+    for line in reversed(tail.splitlines()):
+        try: cwd = json.loads(line).get("cwd")
+        except Exception: continue
+        if cwd: return cwd
+    return None
+
+def waiting(cfg, this=None):
+    """(waiting, unavailable, this_waits): the sessions recorded under a notice newer than the one accepted that can still be
+    sent, and those whose record has gone from this machine, so that nothing of them can be. The session asking (this) is
+    one of the waiting while uploads are held for this version's own notice, even before anything of it is queued: what it
+    records is this version's, under that notice (an earlier version hands its hooks here), unless its folder is left out."""
+    queued = queued_sessions(held_queue_dirs(cfg))
+    here = [tp for tp in queued if os.path.exists(tp)]
+    gone = [tp for tp in queued if not os.path.exists(tp)]
+    this_waits = bool(this) and os.path.exists(this) and notice_key(accepted_notice(cfg)) < notice_key(PRIVACY_NOTICE_VERSION) \
+        and not load_state(this).get("excluded") and not excluded_by(last_cwd(this) or os.getcwd(), excluded_folders())
+    if this_waits and this not in here: here = sorted(here + [this])
+    return here, gone, this_waits
+
+def waiting_sessions(cfg=None, this=None):
+    """The sessions that wait for the person's choice of a changed notice (see waiting)."""
+    return waiting(cfg if cfg is not None else load_config(), this)[0]
+
+def unavailable_sessions(cfg=None):
+    """The sessions that waited but whose transcript has gone from this machine: they do not count as waiting."""
+    return waiting(cfg if cfg is not None else load_config())[1]
 
 def process(args):
     cfg = load_config()
@@ -656,13 +708,17 @@ def status(args):
     if cmd.is_symlink(): command["kind"] = "link to %s" % os.readlink(cmd)
     elif cmd.exists(): command["kind"] = "follows the installed version" if "stair-command" in cmd.read_text(errors="replace")[:300] else "other"
     keys = {"owner_key": (HOME / "owner.key").exists(), "master_key": (HOME / "master.key").exists()}   # an uninstall leaves both
+    here, gone, this_waits = waiting(cfg, this_session()) if cfg else ([], [], False)
+    newer = installed_now()
     print(json.dumps({"ok": bool(cfg) and "error" not in enc, "configured": bool(cfg), "keys": keys, "endpoint": cfg and cfg.get("endpoint"),
                       "agent_id": cfg and cfg.get("agent_id"), "agent_name": cfg and cfg.get("agent_name"),
                       "transcripts": len(states), "records_uploaded": up, "queued_events": q, "spooled": sp, "set_aside": invalid, "home": str(HOME), "encryption": enc,
                       "privacy_notice": (cfg or {}).get("privacy_notice"), "privacy_notice_installed": PRIVACY_NOTICE_VERSION,
-                      "uploads_paused": bool(cfg) and bool(uploads_paused(cfg, fetch_notices(cfg, offline=True))), "waiting_sessions": len(waiting_sessions()), "waiting_sessions_unavailable": len(unavailable_sessions()),
+                      "uploads_paused": bool(cfg) and bool(uploads_paused(cfg, fetch_notices(cfg, offline=True))), "waiting_sessions": len(here),
+                      "this_session_waiting": this_waits, "waiting_sessions_unavailable": len(gone),
                       "excluded_folders": excluded_folders(), "owner": (cfg or {}).get("owner_email") or ("anonymous" if cfg else None),
-                      "plugin": NAME + " " + plugin_version(), "channel": CHANNEL["STAIR_CHANNEL"], "notice_pending": NOTICE_PENDING.exists(),
+                      "plugin": NAME + " " + plugin_version(), "installed_now": newer, "reload_needed": bool(newer),
+                      "channel": CHANNEL["STAIR_CHANNEL"], "notice_pending": NOTICE_PENDING.exists(),
                       "environment": environment, "command": command}))
     return 0
 
@@ -1047,8 +1103,11 @@ def render_pending(pending):
             summary = str(changes[0].get("summary") or "").strip().rstrip(".") if changes else ""
             lines.append("%s: %s %s is available (you have %s)%s. Say \"update stair\" to update, or ask what changed." % (LABEL, NAME, n["latest"], n["installed"], ": " + summary if summary else ""))
             ctx.append("Update available: %s %s (installed: %s). If they want it, run `%s` (both, in this order: the first fetches the "
-                       "marketplace), then tell them the new version applies to sessions started after the update; the `%s` command and the "
-                       "plugin's Python environment follow by themselves." % (NAME, n["latest"], n["installed"], update, NAME))
+                       "marketplace); the `%s` command and the plugin's Python environment follow by themselves. This session keeps the "
+                       "version it started with, commands included, until the person types /reload-plugins in the prompt box, which only "
+                       "they can do (it is not available over Remote Control or on the phone, where starting a new session does the same); "
+                       "meanwhile its hooks hand what it records to the new version. So, as the next step of your plan after the update, "
+                       "ask them in one line to type it." % (NAME, n["latest"], n["installed"], update, NAME))
             ctx.append("If they ask what it changes: run only `claude plugin marketplace update %s`, then read the entries newer than %s in %s and "
                        "tell them in their language, anything starting with \"Privacy:\" or \"You do:\" first." % (mkt, n["installed"], changes_file(mkt)))
         elif kind == "privacy":   # that uploads wait, and how to choose, the launcher says; the makers' words, if any, follow it
@@ -1087,17 +1146,18 @@ def notices_cmd(args):
                       "pending": pending_notices(cfg, cache), "uploads_paused": bool(uploads_paused(cfg, cache)), "seen": cache.get("seen") or []}, ensure_ascii=False, indent=1))
     return 0
 
-def skip_waiting():
-    """Leave out for good the sessions queued while uploads were held: the person chose not to send them."""
+def skip_waiting(cfg, this=None):
+    """Leave out for good the sessions recorded under a notice not accepted yet, and the session asking (this) when it is
+    one of them: the person chose not to send them. What was recorded under a notice they had accepted stays queued."""
     for _ in range(100):
         lock = hold_lock()
         if lock: break
         time.sleep(0.1)
     else: raise SystemExit("stair: a processor is at work; try again in a moment")
     try:
-        lines, parts = take_queue()
-        sessions = sorted({(ev.get("payload") or {}).get("transcript_path") for ev in map(read_event, lines) if ev} - {None})
-        for tp in sessions:
+        lines, parts = take_queue(held_queue_dirs(cfg))
+        sessions = {(ev.get("payload") or {}).get("transcript_path") for ev in map(read_event, lines) if ev} - {None}
+        for tp in sorted(sessions | ({this} if this else set())):
             st = load_state(tp); leave_out(st, None, "held for a notice, not sent by choice"); save_state(st)
         for part in parts:
             try: part.unlink()
@@ -1107,14 +1167,17 @@ def skip_waiting():
 def accept_notice(args):
     """`accept-notice VERSION [--skip-waiting]`: the person read the current notice (its version must be the one installed) and
     accepts it. The sessions that waited meanwhile are released, and go when the processor next runs (at the end of this turn),
-    or, with --skip-waiting, left out for good. Nothing is sent here, and the numbers say so."""
+    or, with --skip-waiting, left out for good; the session asking is one of them (this_session says so). Nothing is sent
+    here, and the numbers say so."""
     cfg = load_config()
     if not cfg: print(json.dumps({"ok": False, "error": NOT_CONFIGURED})); return 1
     if args.version != PRIVACY_NOTICE_VERSION:
         print(json.dumps({"ok": False, "error": "the installed plugin's notice is %s, not %s; update the plugin first, then read its PRIVACY.md" % (PRIVACY_NOTICE_VERSION, args.version)})); return 1
     skip = getattr(args, "skip_waiting", False)
-    waiting = len(waiting_sessions()); unavailable = len(unavailable_sessions())
-    if skip: skip_waiting()
+    this = this_session()
+    here, gone, this_waits = waiting(cfg, this)
+    if skip: skip_waiting(cfg, this if this_waits else None)
+    count, unavailable = len(here), len(gone)
     cfg["privacy_notice"] = {"version": PRIVACY_NOTICE_VERSION, "accepted_at": now_ms()}
     json.dump(cfg, open(HOME / "config.json", "w", encoding="utf-8"), indent=1)
     for f in (HOME / NOTICE_LATER, HOME / NOTICE_REMINDED):   # the reminder's state is of the notice just accepted
@@ -1122,8 +1185,9 @@ def accept_notice(args):
         except FileNotFoundError: pass
     refresh_notices(cfg, force=True)
     print(json.dumps({"ok": True, "privacy_notice": cfg["privacy_notice"], "uploads_paused": False,
-                      "waiting_sessions_released": 0 if skip else waiting, "waiting_sessions_left_out": waiting if skip else 0,
-                      "waiting_sessions_unavailable": unavailable})); return 0
+                      "waiting_sessions_released": 0 if skip else count, "waiting_sessions_left_out": count if skip else 0,
+                      "waiting_sessions_unavailable": unavailable,
+                      "this_session": ("left_out" if skip else "released") if this_waits else None})); return 0
 
 def notice_later(args):
     """`notice-later`: the person chose "Not now" in /stair:notice. Nothing changes but the reminder: no line about this

@@ -31,7 +31,7 @@ Claude installs the plugin, reads its code and says in three lines what it found
 
    ```bash
    "$HOME/.claude/plugins/cache/stair-ai/stair/$(ls ~/.claude/plugins/cache/stair-ai/stair | sort -V | tail -1)/bin/stair" link
-   stair rl setup --invite STAIR-XXXXX-XXXXX --accept-privacy-notice 2026-11-11
+   stair rl setup --invite STAIR-XXXXX-XXXXX --accept-privacy-notice 2026-11-12
    ```
 
    The setup builds the plugin's own Python environment (with `uv`, or Python 3.12+), creates your owner on the ledger with your invite code (anonymous: the keys are the identity; `--register you@example.com` registers with an e-mail instead, and `stair rl claim you@example.com` attaches one later), makes your content master key, registers this machine as an agent and sends one probe record (which carries the notice version you accepted). Two files come out of it, both readable by you only and never printed or sent:

@@ -1,6 +1,6 @@
 # Stair's privacy notice
 
-Notice version `2026-11-11`. You accept a version at setup; the plugin keeps a note of which one, and asks again when it changes.
+Notice version `2026-11-12`. You accept a version at setup; the plugin keeps a note of which one, and asks again when it changes.
 
 ## In short
 
@@ -74,7 +74,11 @@ The two key files in `~/.stair-dev`, `owner.key` and `master.key`, are your acco
 
 ### Will the plugin tell me things?
 
-At the start of a session it can show you one line from its makers, about a new version or a change to this notice, from a public file it checks at most hourly. You see their words; Claude learns only that there is news, not the words. When this notice changes, nothing is sent until you read and accept the new version by typing `/stair-dev:notice`; sessions in the meantime wait on this machine, and you choose whether they are sent.
+At the start of a session it can show you one line from its makers, about a new version or a change to this notice, from a public file it checks at most hourly. You see their words; Claude learns only that there is news, not the words.
+
+When this notice changes, what the new version records waits on this machine until you accept the new notice: `/stair-dev:notice` shows it, and when you accept, you also choose whether what waited is sent or left out. A session recorded only before the update is not part of that choice: it was recorded under the notice you had accepted, and it is sent once uploads resume.
+
+A session that is open when the plugin is updated keeps running the version it started with until you type `/reload-plugins` in it. From version 0.16.1 on, that version hands what the session records to the new one, where it waits like the rest; an earlier version goes on recording and sending under the notice you had accepted, until the session ends or you reload it.
 
 ### What isn't there yet?
 
@@ -88,6 +92,7 @@ Stair AI runs the server your records go to, `api.stair-ai.com` (the team's stag
 
 ## Changes to this notice
 
+- `2026-11-12`: what happens when this notice changes while a session is open. From version 0.16.1 on, what such a session records waits for the new notice like the rest; the choice after a change is about what was recorded under the new notice. What is recorded for you, and how, is unchanged.
 - `2026-11-11`: Stair's apps. An account given access (today, Stair's team) can publish a page with `/stair-dev:app share`; such a page is not encrypted and opens for anyone with its link. What is recorded for you, and how, is unchanged.
 - `2026-10-31`: rewritten as questions and answers with a short version first. New: why Stair keeps the record, leaving a project out, a preview of what is sent, choosing whether sessions that waited for a changed notice are sent, and the digest each encrypted text carries. What is recorded and sent is unchanged.
 - `2026-10-30.2`: fingerprints keyed with your key; the makers' notices no longer reach Claude; the viewer opens a limited, noted view instead of carrying your master key.

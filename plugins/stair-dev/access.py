@@ -34,7 +34,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from rl_plugin import CHANNEL, HOME, NAME, USER_AGENT, api_key, load_config  # noqa: E402
+from rl_plugin import CHANNEL, HOME, NAME, USER_AGENT, api_key, installed_now, load_config  # noqa: E402
 
 CACHE = HOME / "access.json"
 TOKEN_EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange"
@@ -427,8 +427,9 @@ def main(argv=None):
             return 0
         if args.cmd == "apps":
             found, left_out = apps()
-            if args.json:
-                print(json.dumps({"apps": found, "left_out": left_out}, indent=1))
+            if args.json:   # with whether this session runs an earlier version than the one installed (see /stair:app)
+                newer = installed_now()
+                print(json.dumps({"apps": found, "left_out": left_out, "installed_now": newer, "reload_needed": bool(newer)}, indent=1))
             else:
                 show_apps(found, left_out)
             return 0

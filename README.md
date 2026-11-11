@@ -21,4 +21,4 @@ At the start of a session the plugin says when a newer staging version is out; s
 claude plugin marketplace update stair-ai-dev && claude plugin update stair-dev@stair-ai-dev
 ```
 
-The first command fetches this branch; the new version applies to sessions started after the update.
+The first command fetches this branch. The new version applies to sessions started after the update; a session already open switches over when you type `/reload-plugins` in it, which Claude asks you to do.

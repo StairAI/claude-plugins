@@ -2,6 +2,17 @@
 
 What each version of the Stair plugin for Claude Code changes for the person using it, newest first. When a newer version is out, the plugin says so at the start of a session together with the entries between your version and the new one, and Claude tells you more when you ask. A line that starts with "You do:" is something you have to do; it is said first.
 
+## 0.16.1
+
+After an update, Claude asks you to switch an open session over, and what it records waits for the new privacy notice (2026-11-12).
+
+- You do: after this update, type /reload-plugins in the prompt box (or start a new session), then /stair-dev:notice once to read what changed in the notice and accept it. Only you can type /reload-plugins; over Remote Control or on the phone, start a new session instead.
+- From this version on, a session that is open when an update is installed hands what it records to the new version at once, and Claude asks you, once, to type /reload-plugins so that its commands switch too. Before, an open session went on recording and sending with the version it started with until it ended.
+- When you say "update stair", Claude's plan ends with asking you to type /reload-plugins.
+- /stair-dev:notice and /stair-dev:app say so when the session still runs an earlier version than the one installed; /stair-dev:notice asks you to reload first, since the notice it would show is the earlier version's.
+- /stair-dev:notice counts the sessions recorded under the new notice, this one included, and says what leaving them out does to this session. A session recorded only before the update is not part of the choice: it goes under the notice you had accepted.
+- Privacy: notice version 2026-11-12 says what happens to a session that is open during an update, and which sessions the choice after a change is about. What is recorded for you, and how, is unchanged.
+
 ## 0.16.0
 
 Stair apps: `/stair-dev:app` lists the Stair services your account may use and does what you ask with one, starting with share, which publishes a page for your team. The privacy notice says what an app gets (version 2026-11-11).
