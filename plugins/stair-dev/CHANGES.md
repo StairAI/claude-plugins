@@ -2,6 +2,14 @@
 
 What each version of the Stair plugin for Claude Code changes for the person using it, newest first. When a newer version is out, the plugin says so at the start of a session together with the entries between your version and the new one, and Claude tells you more when you ask. A line that starts with "You do:" is something you have to do; it is said first.
 
+## 0.15.3
+
+After an update, a session you opened before it goes on recording without rebuilding anything.
+
+- When an update brings a new version of the ledger SDK, the plugin builds the new Python environment and keeps the previous one for a week. Before, a session still open on the previous version rebuilt its environment, which takes about a minute, and removed the new one, so the two versions took turns rebuilding.
+- A week on, the previous environment is removed. Until then it takes about 10 to 30 MB.
+- From this version on, a session whose environment has been removed hands its recording to the version installed now, instead of building the environment again. This helps from the next update on.
+
 ## 0.15.2
 
 /stair-dev:notice counts only the sessions that can still be sent and no longer says they were sent before they are; uploads keep the order things happened in.
