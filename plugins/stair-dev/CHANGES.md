@@ -2,6 +2,15 @@
 
 What each version of the Stair plugin for Claude Code changes for the person using it, newest first. When a newer version is out, the plugin says so at the start of a session together with the entries between your version and the new one, and Claude tells you more when you ask. A line that starts with "You do:" is something you have to do; it is said first.
 
+## 0.17.0
+
+Images that a tool returns, such as a screenshot or a picture Claude reads, stay on this machine.
+
+- The record keeps, in each image's place, its type, its size and a fingerprint, the way it already does for thinking blocks; the picture itself is not sent. Text that a tool returns beside an image is sent as before, encrypted.
+- To send images as well, encrypted like the rest, set `"image_content": "full"` in the plugin's `config.json`.
+- On a busy machine we measured, such images were about two thirds of everything sent, by size, so sessions that look at screenshots now send much less.
+- Privacy: the notice is unchanged (version 2026-11-12). It says a tool call's output is recorded; images are now left out of it, which its next version will say.
+
 ## 0.16.1
 
 After an update, Claude asks you to switch an open session over, and what it records waits for the new privacy notice (2026-11-12).

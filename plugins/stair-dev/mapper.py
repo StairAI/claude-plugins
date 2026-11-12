@@ -13,6 +13,7 @@ Reads a Claude Code transcript (JSONL) and returns one record per behavior, by r
     upstream = the Acting of the turn it continues
   "[Request interrupted by user]"    -> Attesting(gate_kind=interrupt, cancel) in the turn it stops; not a turn
   thinking block                     -> Thinking (model_invocation from the message); the text stays on the machine, the record carries its hash and size (thinking_text="hash", the default)
+  image a tool returns               -> stays on the machine: the tool's output carries the image's media type, size and hash in its place (image_content="hash", the default)
   mid-turn assistant text            -> Thinking / Reflecting when a sentence states a decision or a verdict (rule, confidence 0.5),
                                         else Other(assistant.narration, proposed_behavior=Reporting)
   final assistant text               -> Acting (answer.final); a text that ends by asking the user -> Escalating(question)
@@ -39,7 +40,7 @@ upstream_record_id: the server checks that an upstream record exists under the s
 order. Nothing here touches the network.
 """
 from __future__ import annotations
-import hashlib, hmac, json, os, re, uuid, datetime
+import base64, hashlib, hmac, json, os, re, uuid, datetime
 from pathlib import Path
 
 NS = uuid.NAMESPACE_URL
@@ -131,6 +132,27 @@ def file_pointer(device, path, written):
             "path": os.path.abspath(p) if p else None, "change_sha256": sha(written) if written is not None else None,
             "change_bytes": len(written.encode("utf-8")) if isinstance(written, str) else None}
 
+def image_fingerprint(block):
+    """What the ledger gets instead of an image a tool returned (a screenshot, a picture the agent read): its media type,
+    its size and a keyed fingerprint, in the image's place among the tool's output blocks. The image itself never leaves
+    the machine. A block whose bytes cannot be decoded is fingerprinted as it stands."""
+    src = block.get("source") if isinstance(block.get("source"), dict) else {}
+    data = src.get("data")
+    try:
+        raw = base64.b64decode(data, validate=True) if src.get("type") == "base64" and isinstance(data, str) else None
+    except (ValueError, TypeError):
+        raw = None
+    if raw is None:
+        raw = json.dumps(src, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return {"type": "image", "image": "withheld", "media_type": src.get("media_type"), "bytes": len(raw), "sha256": fingerprint(raw)}
+
+def withhold_images(content):
+    """A tool's output with every image block replaced by its fingerprint (image_fingerprint); text and other blocks as
+    they are. Output without images is returned unchanged."""
+    if not isinstance(content, list) or not any(isinstance(b, dict) and b.get("type") == "image" for b in content):
+        return content
+    return [image_fingerprint(b) if isinstance(b, dict) and b.get("type") == "image" else b for b in content]
+
 def thinking_fingerprint(text):
     """What the ledger gets instead of a thinking block's text: its size and SHA-256, as a small JSON document that the SDK
     uploads as content like any other payload. The record stays a complete schema 0.5 record (Thinking requires an
@@ -141,8 +163,9 @@ def thinking_fingerprint(text):
 
 
 class Mapper:
-    def __init__(self, agent_id, device, mapper_name="stair@0.3", component="stair", credential="owner_api_key", thinking_text="hash"):
+    def __init__(self, agent_id, device, mapper_name="stair@0.3", component="stair", credential="owner_api_key", thinking_text="hash", image_content="hash"):
         self.thinking_text = thinking_text  # "hash": the record carries only a fingerprint (sha256 + size) of each thinking block; "full": the text is uploaded as content
+        self.image_content = image_content  # "hash": an image a tool returns is replaced by its fingerprint (media type, size, sha256); "full": it is uploaded as content
         self.agent_id = agent_id; self.device = device or {}; self.mapper = mapper_name
         self.wb = {"component": component, "credential": credential}
 
@@ -286,7 +309,9 @@ class Mapper:
                 for x in results:
                     tu = tool_use.get(x.get("tool_use_id"))
                     if not tu or tu.get("kind") == "skip": continue
-                    rec, kind = tu["rec"], tu["kind"]; content = x.get("content"); ctext = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)[:4000]
+                    rec, kind = tu["rec"], tu["kind"]; content = x.get("content")
+                    if self.image_content != "full": content = withhold_images(content)   # images stay on the machine
+                    ctext = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)[:4000]
                     err = bool(x.get("is_error")); rec["duration_ms"] = max(0, ts - tu["ts"]) if ts and tu.get("ts") else None
                     denied = err and bool(re.search(r"doesn't want to proceed|user declined|denied|requires? approval|needs approval", ctext, re.I))
                     perm = tu.get("perm")

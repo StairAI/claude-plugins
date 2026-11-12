@@ -269,7 +269,7 @@ def process_transcript(cfg, transcript, payload, st, dry=False):
     is excluded) sends nothing from then on."""
     if st.get("excluded") and not dry: return [], [], {"excluded": st["excluded"].get("why")}
     conv = payload.get("session_id") or Path(transcript).stem
-    mp = Mapper(cfg["agent_id"], cfg.get("device") or device_info(), thinking_text=cfg.get("thinking_text", "hash"))
+    mp = Mapper(cfg["agent_id"], cfg.get("device") or device_info(), thinking_text=cfg.get("thinking_text", "hash"), image_content=cfg.get("image_content", "hash"))
     set_fingerprint_key(fingerprint_key(cfg))   # keyed fingerprints, from the master key
     records, info = mp.map_transcript(transcript, conv, permission_events=[dict(p) for p in st.get("permissions", [])])
     # Sub-agent transcripts: their own sessions under the same conversation. The Agent call's result names the
@@ -661,7 +661,7 @@ def setup(args):
     elif account == "existing" and previous.get("owner_email"): cfg["owner_email"] = previous["owner_email"]
     if invite: cfg["invite_code"] = invite.strip()   # kept, so a later setup on this machine does not ask for it again
     if getattr(args, "viewer_url", None): cfg["viewer_url"] = args.viewer_url.rstrip("/")
-    for k in ("viewer_url", "thinking_text"):          # choices made after setup are kept by a later one
+    for k in ("viewer_url", "thinking_text", "image_content"):   # choices made after setup are kept by a later one
         if k not in cfg and (previous.get(k) or kept.get(k)): cfg[k] = previous.get(k) or kept.get(k)
     master_id = None
     if not plaintext:
@@ -1288,7 +1288,7 @@ def preview(args):
     master = load_master_key(mk) if mk and mk.exists() else os.urandom(32)   # before setup: a throwaway key, kept nowhere
     fk = None if clear else derive_fingerprint_key(master)
     set_fingerprint_key(fk)
-    mp = Mapper(agent, cfg.get("device") or device_info(fk), thinking_text=cfg.get("thinking_text", "hash"))
+    mp = Mapper(agent, cfg.get("device") or device_info(fk), thinking_text=cfg.get("thinking_text", "hash"), image_content=cfg.get("image_content", "hash"))
     records, info = mp.map_transcript(str(tp), tp.stem)
     left = load_state(tp).get("excluded") or next(({"folder": d} for d in (excluded_by(c, excluded_folders()) for c in info.get("cwds") or []) if d), None)
     if left:
