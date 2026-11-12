@@ -9,6 +9,7 @@ involves the model; a skill's script calls `stair access token` and reads the to
 
   stair access token --resource https://share.stair-ai.com [--scope share:write] [--fresh]
   stair access me
+  stair access apps [--json]                                  the services this account may use, from their own metadata
   stair access admin handle <owner> <handle> [--replace]      operators, with the ledger's administrator token
   stair access admin grant <owner> <resource> <scope>... [--note TEXT]
   stair access admin grants [--owner <owner>] [--resource URL] [--all]
@@ -33,7 +34,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from rl_plugin import CHANNEL, HOME, USER_AGENT, api_key, load_config  # noqa: E402
+from rl_plugin import CHANNEL, HOME, NAME, USER_AGENT, api_key, installed_now, load_config  # noqa: E402
 
 CACHE = HOME / "access.json"
 TOKEN_EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange"
@@ -96,7 +97,7 @@ def problem(body):
 def account():
     cfg = load_config()
     if not cfg:
-        raise AccessError("this machine has no Stair account yet; run `stair rl setup` first")
+        raise AccessError("this machine has no Stair account yet; run `%s rl setup` first" % NAME)
     key = api_key(cfg)
     if not key:
         raise AccessError("no owner key on this machine (config.json names none, and STAIR_API_KEY is unset)")
@@ -179,8 +180,8 @@ def token(resource, scope=None, fresh=False):
     if status != 200 or not isinstance(body, dict) or not body.get("access_token"):
         error = body.get("error") if isinstance(body, dict) else None
         if error == "invalid_target":
-            raise AccessError("%s. Access is given by the Stair administrator; `stair access me` shows the owner id to "
-                              "send them" % problem(body).rstrip("."))
+            raise AccessError("%s. Access is given by the Stair administrator; `%s access me` shows the owner id to "
+                              "send them" % (problem(body).rstrip("."), NAME))
         if error == "invalid_request" and "subject_token" in problem(body):
             raise AccessError("the gate does not accept this machine's owner key (%s)" % problem(body))
         raise AccessError("the gate refused (%s): %s" % (error or status, problem(body)))
@@ -203,6 +204,97 @@ def me():
     if status != 200 or not isinstance(body, dict):
         raise AccessError("the gate answered %s: %s" % (status, problem(body)))
     return body
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Apps: the services granted to this account, each described by its own metadata (RFC 9728). The plugin carries no
+# app's code: /<name>:app reads an app's documentation from its own address and makes the requests the person asks for.
+# ---------------------------------------------------------------------------------------------------------------------
+
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
+def secure(url):
+    """https, or http to this machine (a service run locally)."""
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme == "https" or (parts.scheme == "http" and parts.hostname in LOCAL_HOSTS)
+
+
+def same_origin(url, resource):
+    a, b = urllib.parse.urlsplit(url), urllib.parse.urlsplit(resource)
+    return (a.scheme, a.netloc.lower()) == (b.scheme, b.netloc.lower())
+
+
+def metadata_url(resource):
+    """Where a service publishes its metadata (RFC 9728, section 3): the well-known path goes before its own path."""
+    parts = urllib.parse.urlsplit(resource)
+    return "%s://%s/.well-known/oauth-protected-resource%s" % (parts.scheme, parts.netloc, parts.path)
+
+
+def app_name(title, resource):
+    """The short name a person uses for an app: its title without "Stair " (share), else its host's first label."""
+    name = re.sub(r"[^a-z0-9]+", "-", re.sub(r"^stair\s+", "", (title or "").strip().lower())).strip("-")
+    if not name:
+        label = (urllib.parse.urlsplit(resource).hostname or "").split(".")[0]
+        name = label[len("stg-"):] if label.startswith("stg-") else label
+    return name
+
+
+def apps():
+    """(apps, left out): the services granted to this account whose own metadata names this channel's gate as theirs.
+
+    That check is what keeps a channel to its own services: the staging channel's gate grants staging's share, whose
+    metadata names the staging gate; a service that takes tokens from another gate is left out, with the reason."""
+    view = me()
+    cfg, _ = account()
+    issuer = gate(cfg, load_cache())["issuer"]
+    found, left_out = [], []
+    for grant in view.get("grants") or []:
+        try:
+            resource = canonical_resource(str(grant.get("resource") or ""))
+        except AccessError:
+            left_out.append({"resource": grant.get("resource"), "why": "not a service's address"})
+            continue
+        why, meta, documentation = None, None, ""
+        if not secure(resource):
+            why = "its address is not https"
+        else:
+            try:
+                status, meta = http("GET", metadata_url(resource))
+                if status != 200 or not isinstance(meta, dict):
+                    why = "it answered %s when asked for its metadata" % status
+            except AccessError as error:
+                why = str(error)
+        if why is None:
+            servers = [str(s).rstrip("/") for s in meta.get("authorization_servers") or []]
+            documentation = str(meta.get("resource_documentation") or "")
+            try:
+                named = canonical_resource(str(meta.get("resource") or ""))
+            except AccessError:
+                named = None
+            if named != resource:
+                why = "its metadata names another service (%s)" % meta.get("resource")
+            elif issuer not in servers:
+                why = "it takes tokens from another gate than this channel's (%s)" % (", ".join(servers) or "none named")
+            elif not documentation or not secure(documentation) or not same_origin(documentation, resource):
+                why = "its documentation is not at its own address"
+        if why:
+            left_out.append({"resource": resource, "why": why})
+            continue
+        title = str(meta.get("resource_name") or "").strip()
+        found.append({"name": app_name(title, resource), "title": title or app_name(title, resource),
+                      "resource": resource, "documentation": documentation, "scopes": grant.get("scopes") or []})
+    return found, left_out
+
+
+def show_apps(found, left_out):
+    if not found:
+        print("no apps for this account yet: Stair's team gives access (`%s access me` shows the owner id to send them)" % NAME)
+    for app in found:
+        print("%s  %s  %s" % (app["name"], app["title"], app["resource"]))
+        print("    how to use it: %s" % app["documentation"])
+    for gone in left_out:
+        print("left out %s: %s" % (gone["resource"], gone["why"]), file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -288,7 +380,7 @@ def admin(args):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="stair access",
+    parser = argparse.ArgumentParser(prog=NAME + " access",
                                      description="The account's key and the Stair services it reaches.")
     commands = parser.add_subparsers(dest="cmd")
     t = commands.add_parser("token", help="print a short-lived access token for one service, for a program to read")
@@ -296,6 +388,8 @@ def main(argv=None):
     t.add_argument("--scope", default=None, help="narrower than everything granted, e.g. share:write")
     t.add_argument("--fresh", action="store_true", help="ask the gate for a new token even when a cached one is good")
     commands.add_parser("me", help="this account's owner id, handle and the services it may reach")
+    listing = commands.add_parser("apps", help="the services this account may use on this channel, with where each says how")
+    listing.add_argument("--json", action="store_true", help="for a program, or for /%s:app" % NAME)
     operators = argparse.ArgumentParser(add_help=False)
     operators.add_argument("--admin-token-file", default=None, help="file holding the administrator token")
     operators.add_argument("--endpoint", default=None, help="the ledger (default: the configured one)")
@@ -330,6 +424,14 @@ def main(argv=None):
             return 0
         if args.cmd == "me":
             show_owner(me())
+            return 0
+        if args.cmd == "apps":
+            found, left_out = apps()
+            if args.json:   # with whether this session runs an earlier version than the one installed (see /stair:app)
+                newer = installed_now()
+                print(json.dumps({"apps": found, "left_out": left_out, "installed_now": newer, "reload_needed": bool(newer)}, indent=1))
+            else:
+                show_apps(found, left_out)
             return 0
         if args.cmd == "admin":
             return admin(args)

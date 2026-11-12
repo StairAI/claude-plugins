@@ -9,10 +9,11 @@ on Stop / SessionEnd, starts this program detached. This program then:
   * uploads the records that have not been uploaded yet, in batches, through the Python SDK,
   * remembers what was uploaded per transcript.
 
-Commands: process (drain the queue), setup, status, flush (retry the spool), map (dry run: map a transcript), viewer (a one-time sign-in link to the viewer; the key stays in its file), key (the content master key: rotate), admin (invite codes, with the ledger's administrator token). Nothing is asked of the model: every record comes from the transcript and the hook events.
+Commands: process (drain the queue), setup, status, flush (retry the spool), map (dry run: map a transcript), preview (the last turn as the ledger would get it, sent nowhere), exclude / include (leave a folder out, or take it back), viewer (a one-time sign-in link to the viewer; the key stays in its file), key (the content master key: rotate), notices / accept-notice / notice-later (the makers' notices; accept the privacy notice; "Not now"), admin (invite codes, with the ledger's administrator token). Nothing is asked of the model: every record comes from the transcript and the hook events.
 
 Content is encrypted on this machine before upload (the SDK's ContentEncryption): setup makes a master key, kept in master.key and never sent; the ledger holds ciphertext and wrapped per-session keys. The viewer link carries the master key in its fragment, which the browser keeps to itself.
-State under $STAIR_HOME (default ~/.stair): config.json, owner.key, master.key, queue/events.jsonl, state/<transcript>.json, spool.jsonl, logs/.
+State under $STAIR_HOME (default ~/.stair): config.json, owner.key, master.key, exclude (folders left out), queue/n-<notice>/events.jsonl, state/<transcript>.json, spool.jsonl, logs/.
+An uninstall leaves it; setup then reconnects the same account. Keys kept elsewhere come back with `setup --restore FOLDER`.
 """
 from __future__ import annotations
 import json, os, re, sys, time, uuid, hashlib, hmac, argparse, socket, getpass, collections
@@ -41,18 +42,37 @@ def channel():
 
 NAME = plugin_name()
 CHANNEL = channel()
+# Which channel speaks, at the start of every line the person is shown: "Stair" (release) or "Stair staging", from channel.env.
+LABEL = CHANNEL.get("STAIR_LABEL") or ("Stair" if CHANNEL.get("STAIR_CHANNEL") == "release" else "Stair staging")
+# A message that tells the person what to run names this channel's own command, never the one of the channel beside it.
+NOT_CONFIGURED = "not configured: run `%s rl setup` first" % NAME
 # Each channel keeps its state under ~/.<name>: ~/.stair for the release channel, ~/.stair-dev for the source.
 # Run from anywhere but Claude Code's plugin cache (a source checkout, --plugin-dir), the state is kept apart: ~/.<name>-src.
 HOME = Path(os.environ.get("STAIR_HOME") or os.environ.get("RL_PLUGIN_HOME") or Path.home() / ("." + NAME + ("" if "/plugins/cache/" in str(HERE) else "-src")))
-QUEUE = HOME / "queue" / "events.jsonl"
 BATCH = 25   # records per upload; with the longer read timeout below, a slow ledger no longer times a batch out
 # The privacy notice (PRIVACY.md beside this file) a person accepts at setup. Bumped whenever the notice changes in
 # substance; setup then asks again.
-PRIVACY_NOTICE_VERSION = "2026-10-30.2"
+PRIVACY_NOTICE_VERSION = "2026-11-12"
+# One queue per privacy notice: the hooks of this version append to queue/n-<its notice>/. A processor of an earlier version,
+# still running in a session opened before an update, takes only the queues it knows (versions before 0.15.0 the flat
+# queue/events.jsonl), so it cannot send a session recorded under a notice the person has not accepted yet.
+QUEUE = HOME / "queue" / ("n-" + PRIVACY_NOTICE_VERSION) / "events.jsonl"
+EXCLUDE = HOME / "exclude"   # folders left out, one per line: the hooks skip their sessions, the processor marks them
 
 def plugin_version():
     try: return json.load(open(HERE / ".claude-plugin" / "plugin.json", encoding="utf-8")).get("version") or "0"
     except Exception: return "0"
+
+def installed_now():
+    """The version Claude Code has installed now, when this copy is an installed one and that is another: a session opened
+    before an update runs the version it started with, commands included, until the person types /reload-plugins. The
+    launcher finds the installed directory (STAIR_INSTALLED_ROOT). None when this is it, when nothing says, or from source."""
+    other = os.environ.get("STAIR_INSTALLED_ROOT") or ""
+    if not other or "/plugins/cache/" not in str(HERE): return None
+    try:
+        if Path(other).resolve() == HERE: return None
+        return str(json.load(open(Path(other) / ".claude-plugin" / "plugin.json", encoding="utf-8")).get("version") or "") or None
+    except Exception: return None
 
 # urllib's default User-Agent (Python-urllib/x.y) is refused by the browser-integrity check of the CDN in front of the hosted
 # ledger (Cloudflare error 1010), so the two direct requests below name the plugin instead. The SDK (httpx) names itself.
@@ -77,13 +97,21 @@ def api_key(cfg):
     if cfg.get("api_key_file"): return open(os.path.expanduser(cfg["api_key_file"]), encoding="utf-8").read().strip()
     return os.environ.get("STAIR_API_KEY") or os.environ.get("RL_API_KEY", "")
 
-def device_info():
+def device_info(key=None):
+    """This machine: its id, from the system's machine id (the host name where there is none, as on macOS), made with the
+    fingerprint key when there is one, so that the ledger can tell your machines apart and nobody can test a guessed host
+    name against it; the host and user names go only into file pointers, which are content."""
     mid = ""
     for p in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
         try: mid = open(p).read().strip(); break
         except Exception: pass
-    host = socket.gethostname()
-    return {"device_id": hashlib.sha256((mid or host).encode()).hexdigest()[:32], "host": host, "user": getpass.getuser()}
+    host = socket.gethostname(); raw = (mid or host).encode()
+    did = hmac.new(key, b"device:" + raw, hashlib.sha256).hexdigest() if key else hashlib.sha256(raw).hexdigest()
+    return {"device_id": did[:32], "host": host, "user": getpass.getuser()}
+
+def default_agent_name():
+    """This machine's name in a new account when the person gives none: the kind of machine, nothing about the person."""
+    return "claude-code-" + {"darwin": "mac", "linux": "linux", "win32": "windows"}.get(sys.platform, "machine")
 
 def master_key_path(cfg):
     """Where the content master key lives, or None when this install uploads in the clear."""
@@ -124,10 +152,13 @@ def fingerprint_key(cfg):
     if not p: return None
     try:
         from reasoning_ledger import load_master_key
-        prk = hmac.new(b"stair-fingerprint", load_master_key(p), hashlib.sha256).digest()      # HKDF extract, fixed salt
-        return hmac.new(prk, b"stair fingerprint v1\x01", hashlib.sha256).digest()              # HKDF expand, one block
+        return derive_fingerprint_key(load_master_key(p))
     except Exception as e:
         log("fingerprint-key", e); return None
+
+def derive_fingerprint_key(master):
+    prk = hmac.new(b"stair-fingerprint", master, hashlib.sha256).digest()      # HKDF extract, fixed salt
+    return hmac.new(prk, b"stair fingerprint v1\x01", hashlib.sha256).digest()  # HKDF expand, one block
 
 def patient_transport():
     """The SDK's httpx transport with a read timeout of a minute instead of httpx's five seconds: a batch of encrypted
@@ -156,42 +187,72 @@ def client(cfg):
     return _client
 
 def upload(cfg, records):
-    """Upload records in batches; the SDK uploads raw content at content positions first. Returns (ok_ids, failed).
-    A batch answers per record (the server isolates failures inside a batch), so a record counts as uploaded only when its
-    own acknowledgement came back without an error code. A record whose upstream failed in this run is not sent at all:
-    the server would reject it for the missing upstream. It goes to the spool with that reason, and `stair rl flush` retries it
-    once the upstream is in."""
+    """Upload records in their order, in batches; the SDK uploads raw content at content positions first. Returns (ok_ids,
+    failed). An Attesting has a call of its own, so it goes between the batches of the records around it: what follows from
+    it never reaches the server first (sent after its batch, the record after a turn the person stopped was rejected for
+    its missing upstream, and took what followed with it). A batch answers per record (the server isolates failures inside
+    a batch), so a record counts as uploaded only when its own acknowledgement came back without an error code. A record
+    whose upstream failed in this run is not sent at all: the server would reject it for the missing upstream. It goes to
+    the spool with that reason, and `stair rl flush` retries it once the upstream is in."""
     c = client(cfg); ok = []; failed = []; bad = set()
     def fail(r, err):
         failed.append({"record": r, "error": str(err)[:300]}); bad.add(r["record_id"])
-    for i in range(0, len(records), BATCH):
-        chunk = []
-        for r in records[i:i + BATCH]:
+    def sendable(rs):   # held back: what follows from a record that failed before it was its turn
+        out = []
+        for r in rs:
             blocked = [u for u in (r.get("upstream_record_id") or []) if u in bad]
             if blocked: fail(r, f"upstream_failed: {blocked[0]}")
-            else: chunk.append(r)
-        attest = [r for r in chunk if r["behavior"] == "Attesting"]; others = [r for r in chunk if r["behavior"] != "Attesting"]
-        if others:
-            try:
-                ack = c._submit_batch(others)
-                results = [x for x in (ack.get("results") or []) if isinstance(x, dict)] if isinstance(ack, dict) else []
-                by_id = {x.get("record_id"): x for x in results}
-                for n, r in enumerate(others):
-                    res = by_id.get(r["record_id"]) or (results[n] if n < len(results) and not results[n].get("record_id") else None)
-                    if res is None: fail(r, "no_ack: the batch response did not mention this record")
-                    elif res.get("code"): fail(r, f"{res['code']}: {res.get('message', '')}")
-                    else: ok.append(r["record_id"])
-            except Exception as e:
-                log("upload", e)
-                for r in others:   # one by one, so a single bad record does not block the rest
-                    try: c._submit(r); ok.append(r["record_id"])
-                    except Exception as e2: fail(r, repr(e2))
-        for a in attest:
+            else: out.append(r)
+        return out
+    def send_batch(rs):
+        rs = sendable(rs)
+        if not rs: return
+        try:
+            ack = c._submit_batch(rs)
+            results = [x for x in (ack.get("results") or []) if isinstance(x, dict)] if isinstance(ack, dict) else []
+            by_id = {x.get("record_id"): x for x in results}
+            for n, r in enumerate(rs):
+                res = by_id.get(r["record_id"]) or (results[n] if n < len(results) and not results[n].get("record_id") else None)
+                if res is None: fail(r, "no_ack: the batch response did not mention this record")
+                elif res.get("code"): fail(r, f"{res['code']}: {res.get('message', '')}")
+                else: ok.append(r["record_id"])
+        except Exception as e:
+            log("upload", e)
+            for r in rs:   # one by one, so a single bad record does not block the rest
+                try: c._submit(r); ok.append(r["record_id"])
+                except Exception as e2: fail(r, repr(e2))
+    batch = []
+    for r in records:
+        if r["behavior"] != "Attesting":
+            batch.append(r)
+            if len(batch) == BATCH: send_batch(batch); batch = []
+            continue
+        send_batch(batch); batch = []
+        for a in sendable([r]):
             try: c._submit_attesting(a); ok.append(a["record_id"])
             except Exception as e2: fail(a, repr(e2))
+    send_batch(batch)
     return ok, failed
 
 # ---------------------------------------------------------------- state per transcript
+def excluded_folders():
+    try: return [l.rstrip("\n") for l in open(EXCLUDE, encoding="utf-8") if l.strip()]
+    except OSError: return []
+
+def excluded_by(path, folders):
+    """The folder left out that holds `path` (itself or anything below it), or None. Both sides are resolved, so a link to the
+    folder is the folder."""
+    if not path or not folders: return None
+    p = os.path.realpath(os.path.expanduser(str(path)))
+    for d in folders:
+        r = os.path.realpath(d)
+        if p == r or p.startswith(r.rstrip(os.sep) + os.sep): return d
+    return None
+
+def leave_out(st, folder, why="folder left out"):
+    """Mark a session left out for good: none of it is sent from now on, even if its folder is taken back later."""
+    if not st.get("excluded"): st["excluded"] = {"why": why, "folder": folder, "at": now_ms()}
+
 def state_path(transcript): return HOME / "state" / (hashlib.sha256(str(transcript).encode()).hexdigest()[:24] + ".json")
 def load_state(transcript):
     p = state_path(transcript)
@@ -204,7 +265,9 @@ def save_state(st):
     tmp = p.with_suffix(".tmp"); json.dump(st, open(tmp, "w", encoding="utf-8"), ensure_ascii=False); os.replace(tmp, p)
 
 def process_transcript(cfg, transcript, payload, st, dry=False):
-    """Map the whole transcript, upload what is new, remember it."""
+    """Map the whole transcript, upload what is new, remember it. A session left out (its folder, or any folder it worked in,
+    is excluded) sends nothing from then on."""
+    if st.get("excluded") and not dry: return [], [], {"excluded": st["excluded"].get("why")}
     conv = payload.get("session_id") or Path(transcript).stem
     mp = Mapper(cfg["agent_id"], cfg.get("device") or device_info(), thinking_text=cfg.get("thinking_text", "hash"))
     set_fingerprint_key(fingerprint_key(cfg))   # keyed fingerprints, from the master key
@@ -215,23 +278,35 @@ def process_transcript(cfg, transcript, payload, st, dry=False):
     spawned = {r["child_session_id"]: r["record_id"] for r in records if r.get("behavior") == "Delegating" and r.get("child_session_id")}
     unmatched = [r for r in records if r.get("behavior") == "Delegating" and r.get("kind") == "spawn" and not r.get("child_session_id")
                  and r.get("delegate_agent_id") != "claude-code-session"]
+    # A sub-agent that is continued stops again, and each stop lists it; its transcript is one, mapped once, in the place of
+    # its first stop. Mapped at every stop, all its records went up twice, and its second stop took the call of the
+    # sub-agent matched by order after it.
+    subagents, seen = [], set()
     for sa in sorted(st.get("subagents", []), key=lambda x: x.get("ts") or 0):
+        if sa.get("agent_id") and sa["agent_id"] in seen: continue
+        seen.add(sa.get("agent_id")); subagents.append(sa)
+    for sa in subagents:
         atp = sa.get("agent_transcript_path"); prefix = "%s:sub:%s" % (conv, str(sa.get("agent_id") or "x")[:8])
         parent_ref = spawned.get(prefix)
         if not parent_ref and unmatched:
             rec = unmatched.pop(0); rec["child_session_id"] = prefix; parent_ref = rec["record_id"]
         if atp and os.path.exists(atp):
             try:
-                child, _ = mp.map_transcript(atp, conv, child_prefix=prefix, parent_ref=parent_ref)
-                records.extend(child)
+                child, child_info = mp.map_transcript(atp, conv, child_prefix=prefix, parent_ref=parent_ref)
+                records.extend(child); info["cwds"] = sorted(set(info.get("cwds") or []) | set(child_info.get("cwds") or []))
             except Exception as e:
                 log("subagent-map", e)
     records = [strip_none(r) for r in records]
+    if not dry:
+        folders = excluded_folders(); left = next((d for d in (excluded_by(c, folders) for c in info.get("cwds") or []) if d), None)
+        if left:   # it worked in a folder left out: nothing more of it is sent
+            leave_out(st, left); st["last_processed"] = now_ms(); save_state(st)
+            return records, [], {**info, "excluded": "folder left out"}
     done = set(st.get("uploaded", [])); new = [r for r in records if r["record_id"] not in done]
     if dry: return records, new, info
     ok, failed = upload(cfg, new) if new else ([], [])
     st["uploaded"] = sorted(done | set(ok)); st["last_processed"] = now_ms(); st["info"] = info; save_state(st)
-    spool(failed)
+    spool([dict(x, transcript=str(transcript)) for x in failed])
     return records, new, {**info, "uploaded": len(ok), "failed": len(failed)}
 
 def lasting(err):
@@ -241,9 +316,12 @@ def lasting(err):
     return e.startswith("ValidationError(") or (e.startswith("validation_failed:") and "upstream_record_id" not in e)
 
 def spool(failed):
-    """Keep what failed: to retry (spool.jsonl, `flush`), or aside when retrying cannot help (spool.invalid.jsonl)."""
+    """Keep what failed: to retry (spool.jsonl, `flush`), or aside when retrying cannot help (spool.invalid.jsonl). The log says
+    why, as the spool forgets it once a retry works: one line for the lot, because one failure takes the rest of its session with it."""
     if not failed: return
     HOME.mkdir(parents=True, exist_ok=True)
+    log("upload-failed", {"records": len(failed), "by_reason": dict(collections.Counter(str(x.get("error")).split(":")[0].split("(")[0] for x in failed)),
+                          "first": str(failed[0].get("error"))[:200]})
     for name, keep in (("spool.jsonl", False), ("spool.invalid.jsonl", True)):
         items = [x for x in failed if lasting(x.get("error")) == keep]
         if items:
@@ -264,13 +342,28 @@ def hold_lock():
     except OSError:
         f.close(); return None
 
-def take_queue():
-    """Move the queue aside, then read it: a hook that appends meanwhile starts a fresh queue, so no event is lost. Parts left
-    by a run that stopped halfway are read again (records are idempotent on the ledger)."""
+def queue_dirs():
+    """The queues this version takes: the flat one of versions before 0.15.0 and one per privacy notice up to its own. A queue
+    of a later notice is left to the version that wrote it."""
+    root = QUEUE.parent.parent if QUEUE.parent.name.startswith("n-") else QUEUE.parent
+    out = [root]
+    for d in sorted(root.glob("n-*")):
+        v = d.name[2:]
+        if d.is_dir() and NOTICE_VERSION_RE.fullmatch(v) and notice_key(v) <= notice_key(PRIVACY_NOTICE_VERSION) and d not in out: out.append(d)
+    if QUEUE.parent not in out: out.append(QUEUE.parent)
+    return [d for d in out if d.is_dir()]
+
+def take_queue(dirs=None):
+    """Move each queue aside (of dirs, all this version takes by default), then read it: a hook that appends meanwhile starts
+    a fresh queue, so no event is lost. Parts left by a run that stopped halfway are read again (records are idempotent on
+    the ledger)."""
     QUEUE.parent.mkdir(parents=True, exist_ok=True)
-    parts = sorted(QUEUE.parent.glob("events.*.taken"))
-    if QUEUE.exists():
-        taken = QUEUE.with_name("events.%d.%d.taken" % (now_ms(), os.getpid())); os.replace(QUEUE, taken); parts.append(taken)
+    parts = []
+    for d in (queue_dirs() if dirs is None else dirs):
+        found = sorted(d.glob("events.*.taken")); q = d / "events.jsonl"
+        if q.exists():
+            taken = d / ("events.%d.%d.taken" % (now_ms(), os.getpid())); os.replace(q, taken); found.append(taken)
+        parts += found
     lines = []
     for part in parts:
         try: lines += [l for l in open(part, encoding="utf-8") if l.strip()]
@@ -278,7 +371,75 @@ def take_queue():
     return lines, parts
 
 def queue_waiting():
-    return QUEUE.exists() or any(QUEUE.parent.glob("events.*.taken"))
+    return any((d / "events.jsonl").exists() or any(d.glob("events.*.taken")) for d in queue_dirs())
+
+def read_event(line):
+    try: return json.loads(line)
+    except Exception: return repair_event_line(line)
+
+def queued_lines(dirs=None):
+    """Every queued event line (of dirs, all queues by default), left where it is (for counting)."""
+    out = []
+    for d in (queue_dirs() if dirs is None else dirs):
+        for f in [d / "events.jsonl"] + sorted(d.glob("events.*.taken")):
+            try: out += [l for l in open(f, encoding="utf-8") if l.strip()]
+            except OSError: pass
+    return out
+
+def queued_sessions(dirs=None):
+    """The sessions with something queued (in dirs, all queues by default) and not left out."""
+    queued = {(ev.get("payload") or {}).get("transcript_path") for ev in map(read_event, queued_lines(dirs)) if ev} - {None}
+    return sorted(tp for tp in queued if not load_state(tp).get("excluded"))
+
+def accepted_notice(cfg):
+    return ((cfg or {}).get("privacy_notice") or {}).get("version") or ""
+
+def held_queue_dirs(cfg):
+    """The queues of notices newer than the one the person accepted. What was recorded there waits for their choice; the flat
+    queue and those of notices they accepted hold what was recorded under those, which is sent once uploads resume, whatever
+    they choose."""
+    accepted = accepted_notice(cfg)
+    return [d for d in queue_dirs() if d.name.startswith("n-") and notice_key(d.name[2:]) > notice_key(accepted)]
+
+def this_session():
+    """The transcript of the session a command runs in, from the id Claude Code gives the commands it runs; None elsewhere."""
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", sid): return None
+    found = sorted(claude_projects().glob("*/%s.jsonl" % sid))
+    return str(found[0]) if found else None
+
+def last_cwd(tp):
+    """Where the session worked last, from the end of its transcript."""
+    try:
+        with open(tp, "rb") as f:
+            f.seek(0, 2); f.seek(max(0, f.tell() - 65536)); tail = f.read().decode("utf-8", "replace")
+    except OSError: return None
+    for line in reversed(tail.splitlines()):
+        try: cwd = json.loads(line).get("cwd")
+        except Exception: continue
+        if cwd: return cwd
+    return None
+
+def waiting(cfg, this=None):
+    """(waiting, unavailable, this_waits): the sessions recorded under a notice newer than the one accepted that can still be
+    sent, and those whose record has gone from this machine, so that nothing of them can be. The session asking (this) is
+    one of the waiting while uploads are held for this version's own notice, even before anything of it is queued: what it
+    records is this version's, under that notice (an earlier version hands its hooks here), unless its folder is left out."""
+    queued = queued_sessions(held_queue_dirs(cfg))
+    here = [tp for tp in queued if os.path.exists(tp)]
+    gone = [tp for tp in queued if not os.path.exists(tp)]
+    this_waits = bool(this) and os.path.exists(this) and notice_key(accepted_notice(cfg)) < notice_key(PRIVACY_NOTICE_VERSION) \
+        and not load_state(this).get("excluded") and not excluded_by(last_cwd(this) or os.getcwd(), excluded_folders())
+    if this_waits and this not in here: here = sorted(here + [this])
+    return here, gone, this_waits
+
+def waiting_sessions(cfg=None, this=None):
+    """The sessions that wait for the person's choice of a changed notice (see waiting)."""
+    return waiting(cfg if cfg is not None else load_config(), this)[0]
+
+def unavailable_sessions(cfg=None):
+    """The sessions that waited but whose transcript has gone from this machine: they do not count as waiting."""
+    return waiting(cfg if cfg is not None else load_config())[1]
 
 def process(args):
     cfg = load_config()
@@ -303,15 +464,16 @@ def drain(cfg, args):
     while queue_waiting():
         if not waited: time.sleep(args.delay); waited = True   # the transcript is written asynchronously, may lag the Stop hook
         lines, parts = take_queue()
-        by_transcript = {}; acts = {}
+        by_transcript = {}; acts = {}; folders = excluded_folders()
         for l in lines:
-            try: ev = json.loads(l)
-            except Exception:
-                ev = repair_event_line(l)
-                if ev is None: continue
+            ev = read_event(l)
+            if ev is None: continue
             p = ev.get("payload") or {}; tp = p.get("transcript_path"); e = ev.get("event")
             if not tp: continue
             st = by_transcript.setdefault(tp, load_state(tp))
+            left = excluded_by(p.get("cwd"), folders)
+            if left: leave_out(st, left)
+            if st.get("excluded"): continue   # left out: its events are dropped, and it is never mapped again
             if e in ("PermissionRequest", "PermissionDenied"):
                 st.setdefault("permissions", []).append({"tool_name": p.get("tool_name"), "tool_use_id": p.get("tool_use_id"), "tool_input": p.get("tool_input"), "ts": ev.get("ts"), "denied": e == "PermissionDenied"})
             elif e == "SubagentStop":
@@ -325,7 +487,9 @@ def drain(cfg, args):
                 _, new, info = process_transcript(cfg, tp, acts[tp], st)
                 summary.append({"transcript": tp, "new": len(new), **info})
             except Exception as e:
-                log("process", e); save_state(st)
+                if os.path.exists(tp): log("process", e)
+                else: summary.append({"transcript": tp, "new": 0, "gone": True})   # gone from this machine: nothing to send, and not a fault
+                save_state(st)
         if summary: print(json.dumps(summary, ensure_ascii=False))
         for part in parts:
             try: part.unlink()
@@ -363,6 +527,28 @@ def save_key(path, key):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f: f.write(key.strip() + "\n")
 
+def set_aside(path):
+    """A key about to be replaced moves to <name>.replaced-<ms>; it is never deleted: an account's key, once lost, is lost."""
+    if path.exists(): os.replace(path, path.with_name(path.name + ".replaced-%d" % now_ms()))
+
+def copy_key(src, dst):
+    """A kept key copied into place, readable by this user only. Its bytes go from file to file: never printed or sent."""
+    data = src.read_bytes()
+    fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f: f.write(data)
+
+def kept_keys(src):
+    """Where `setup --restore PATH` finds the keys a person kept: PATH is the folder holding owner.key and master.key (a copy
+    of their state directory, say) or one of those two files. Returns (owner key file, master key file or None, the copy's
+    config.json or {})."""
+    p = Path(os.path.expanduser(src))
+    folder = p if p.is_dir() else p.parent
+    if not (folder / "owner.key").is_file():
+        raise SystemExit("stair: there is no owner.key in %s; --restore takes the folder where you kept owner.key and master.key" % folder)
+    try: old = json.load(open(folder / "config.json", encoding="utf-8"))
+    except Exception: old = {}
+    return folder / "owner.key", (folder / "master.key" if (folder / "master.key").is_file() else None), old
+
 def ensure_master_key(path):
     """The content master key: made once, kept in a file only this user can read, never printed or sent. Returns its id."""
     from reasoning_ledger import generate_master_key, load_master_key, master_key_id, save_master_key
@@ -373,67 +559,132 @@ def privacy_notice_text():
     try: return open(HERE / "PRIVACY.md", encoding="utf-8").read()
     except Exception: return "(PRIVACY.md is missing from the plugin directory)"
 
+def short_notice():
+    """The notice's short version, its "In short" section: what setup prints, and what /stair:install and /stair:notice show
+    as written."""
+    m = re.search(r"^## In short\n(.*?)(?=^## )", privacy_notice_text(), re.S | re.M)
+    return m.group(1).strip() if m else privacy_notice_text()
+
 def require_privacy_consent(args):
     """Setup goes no further until the current notice has been accepted: whoever runs it, a person or an assistant
     acting for one, has to have put the notice in front of the person first. The notice is printed here so that it is
     at least seen; accepting is the flag."""
     given = getattr(args, "accept_privacy_notice", None)
     if given == PRIVACY_NOTICE_VERSION: return
-    sys.stdout.write(privacy_notice_text().rstrip() + "\n\n")
-    if given: print("stair: the privacy notice changed (you accepted %s; the current notice is %s). Read it above, then run setup again with --accept-privacy-notice %s" % (given, PRIVACY_NOTICE_VERSION, PRIVACY_NOTICE_VERSION))
-    else: print("stair: read the notice above (PRIVACY.md in the plugin directory); then run setup again with --accept-privacy-notice %s. Nothing was registered or sent." % PRIVACY_NOTICE_VERSION)
+    sys.stdout.write("Stair's privacy notice %s, in short:\n\n%s\n\nThe full notice: %s\n\n" % (PRIVACY_NOTICE_VERSION, short_notice(), HERE / "PRIVACY.md"))
+    if given: print("stair: the privacy notice changed (you accepted %s; the current notice is %s). Read it, then run setup again with --accept-privacy-notice %s" % (given, PRIVACY_NOTICE_VERSION, PRIVACY_NOTICE_VERSION))
+    else: print("stair: read the notice; then run setup again with --accept-privacy-notice %s. Nothing was registered or sent." % PRIVACY_NOTICE_VERSION)
     raise SystemExit(2)
 
 def setup(args):
+    """Connect this machine to an account: a new one (an invite code), the one whose keys are already in $STAIR_HOME (set up
+    again, or installed again after an uninstall, which leaves them), or the one whose keys the person kept (--restore FOLDER).
+    An earlier account is checked with the ledger before anything is written: its owner key must be accepted, and when the
+    ledger holds sessions of this machine, the master key here must be the one that opens them, or setup stops and says so
+    (--new-master-key starts a new key instead, leaving those sessions unreadable). No key is ever printed, sent or deleted."""
     require_privacy_consent(args)
     HOME.mkdir(parents=True, exist_ok=True)
     previous = load_config() or {}
+    endpoint = args.endpoint.rstrip("/")
     invite = getattr(args, "invite", None) or os.environ.get("STAIR_INVITE_CODE") or previous.get("invite_code")
-    key_path = HOME / "owner.key"; email = (getattr(args, "register", None) or "").strip() or None
-    if getattr(args, "register", None) is None and args.api_key_file:
-        pass                                       # a key the person was given
-    elif getattr(args, "register", None) is not None or not key_path.exists():
+    key_path, master_path = HOME / "owner.key", HOME / "master.key"
+    register = getattr(args, "register", None); email = (register or "").strip() or None
+    force, fresh, plaintext = getattr(args, "force", False), getattr(args, "new_master_key", False), getattr(args, "plaintext", False)
+    owner_src, master_src, kept = None, None, {}
+    if getattr(args, "restore", None):
+        if register is not None: raise SystemExit("stair: --restore reconnects the account your keys belong to; leave out --register")
+        owner_src, master_src, kept = kept_keys(args.restore)
+        same = lambda a, b: b.exists() and a.resolve() == b.resolve()
+        if same(owner_src, key_path): owner_src = None              # the keys are where they belong already
+        if master_src and same(master_src, master_path): master_src = None
+        if fresh: master_src = None                                 # a new master key: the kept one is not used
+        for src, dst in ((owner_src, key_path), (master_src, master_path)):
+            if src and dst.exists() and dst.read_bytes() != src.read_bytes() and not force:
+                raise SystemExit("stair: %s holds another key than the one in %s; nothing was changed. Run setup again with --force to "
+                                 "use the kept one: the key here is then moved to %s.replaced-<time>, not deleted" % (dst, src.parent, dst.name))
+    if owner_src:
+        account, key_file = "restored", owner_src
+    elif register is None and args.api_key_file:
+        account, key_file = "existing", Path(os.path.expanduser(args.api_key_file))   # a key the person was given
+    elif register is not None or not key_path.exists():
         # Register: anonymously unless an e-mail is given (--register you@example.com). The keys are the identity; an
         # e-mail can be claimed later with `stair rl claim`.
         token = os.environ.get("STAIR_REGISTRATION_TOKEN") or os.environ.get("RL_REGISTRATION_TOKEN") or (open(os.path.expanduser(args.registration_token_file), encoding="utf-8").read().strip() if args.registration_token_file else None)
-        if key_path.exists() and not args.force:
+        if key_path.exists() and not force:
             raise SystemExit("stair: %s exists; leave out --register to keep using it, --api-key-file %s to say so, or --force to replace it" % (key_path, key_path))
-        save_key(key_path, register_owner(args.endpoint, email, token, invite)); args.api_key_file = str(key_path)
+        new_key = register_owner(endpoint, email, token, invite)
+        set_aside(key_path); save_key(key_path, new_key)
+        account, key_file = "new", key_path
     else:
-        args.api_key_file = str(key_path)          # set up again on a machine that already has its owner key
-    cfg = {"endpoint": args.endpoint.rstrip("/"), "api_key_file": args.api_key_file, "agent_name": args.agent_name, "device": device_info(),
+        account, key_file = "existing", key_path                   # set up again, or installed again: the keys stayed here
+    name = getattr(args, "agent_name", None) or kept.get("agent_name") or previous.get("agent_name")
+    cfg = {"endpoint": endpoint, "api_key_file": str(key_path if account == "restored" else key_file), "agent_name": name, "device": device_info(),
            "privacy_notice": {"version": PRIVACY_NOTICE_VERSION, "accepted_at": now_ms()}}
     if getattr(args, "sdk_src", None): cfg["sdk_src"] = args.sdk_src   # a development checkout of the SDK, only when asked for
-    if email: cfg["owner_email"] = email
-    elif previous.get("owner_email"): cfg["owner_email"] = previous["owner_email"]
+    use_sdk_src(cfg)
+    from reasoning_ledger import LedgerClient, RegisterAgentOpts, ResolveAgentOpts, load_master_key, master_key_id
+    ask = {"endpoint": endpoint, "api_key_file": str(key_file)}       # the account as the ledger knows it, before anything is copied
+    owner, held = {}, []
+    if account != "new":
+        owner = owner_request(ask, "GET", "/v1/owners/me", refused="the ledger at %s does not accept the owner key in %s: the key belongs to another "
+                              "ledger (stair writes to api.stair-ai.com, stair-dev to stg-api.stair-ai.com) or it was replaced. Nothing was changed." % (endpoint, key_file)) or {}
+        if not name:
+            machines = account_machines(ask)
+            if len(machines) > 1:
+                raise SystemExit("stair: this account has sessions from %d machines: %s; name this machine with --agent-name: an earlier name "
+                                 "continues that machine's records, a new name adds a machine to the account" % (len(machines), ", ".join(m["name"] for m in machines)))
+            if machines: name = machines[0]["name"]
+    name = cfg["agent_name"] = name or default_agent_name()   # the kind of machine, unless the person names it
+    key = open(key_file, encoding="utf-8").read().strip()
+    try: aid = LedgerClient.resolve_agent_id(ResolveAgentOpts(api_key=key, endpoint=endpoint, name=name))
+    except Exception: aid = None
+    if account != "new" and aid and not plaintext:
+        held = account_keys(ask, aid)                               # this machine's sessions on the ledger, one data key each
+        mk = master_src or (master_path if master_path.exists() else None)
+        if mk:
+            try: mk_id = master_key_id(load_master_key(mk))
+            except Exception as e: raise SystemExit("stair: %s is not a master key this plugin can read (%s); nothing was changed" % (mk, str(e)[:120]))
+        if held and not fresh:
+            if not mk:
+                raise SystemExit("stair: the ledger holds %d sessions of %s, encrypted with a master key that is not on this machine; nothing was changed. "
+                                 "Run setup again with --restore and the folder where you kept master.key; or, if that key is lost, with --new-master-key: "
+                                 "those sessions then stay unreadable, to you as to anyone." % (len(held), name))
+            if not any(k.get("master_key_id") == mk_id for k in held):
+                raise SystemExit("stair: the master key in %s opens none of the %d sessions of %s on the ledger; nothing was changed. Restore the "
+                                 "master.key they were recorded with, or run setup again with --new-master-key." % (mk, len(held), name))
+    if account == "restored":
+        for src, dst in ((owner_src, key_path), (master_src, master_path)):
+            if src and not (dst.exists() and dst.read_bytes() == src.read_bytes()): set_aside(dst); copy_key(src, dst)
+    if not aid: aid = LedgerClient.register_agent(RegisterAgentOpts(api_key=key, endpoint=endpoint, name=name))["agent_id"]
+    cfg["agent_id"] = aid
+    if email or owner.get("email"): cfg["owner_email"] = email or owner.get("email")
+    elif account == "existing" and previous.get("owner_email"): cfg["owner_email"] = previous["owner_email"]
     if invite: cfg["invite_code"] = invite.strip()   # kept, so a later setup on this machine does not ask for it again
     if getattr(args, "viewer_url", None): cfg["viewer_url"] = args.viewer_url.rstrip("/")
-    use_sdk_src(cfg)
-    from reasoning_ledger import LedgerClient, RegisterAgentOpts, ResolveAgentOpts
-    key = api_key(cfg)
-    try: aid = LedgerClient.resolve_agent_id(ResolveAgentOpts(api_key=key, endpoint=cfg["endpoint"], name=cfg["agent_name"]))
-    except Exception: aid = LedgerClient.register_agent(RegisterAgentOpts(api_key=key, endpoint=cfg["endpoint"], name=cfg["agent_name"]))["agent_id"]
-    cfg["agent_id"] = aid
+    for k in ("viewer_url", "thinking_text"):          # choices made after setup are kept by a later one
+        if k not in cfg and (previous.get(k) or kept.get(k)): cfg[k] = previous.get(k) or kept.get(k)
     master_id = None
-    if not getattr(args, "plaintext", False):
-        cfg["master_key_file"] = str(HOME / "master.key"); master_id = ensure_master_key(HOME / "master.key")
+    if not plaintext:
+        if fresh and account != "new": set_aside(master_path)
+        cfg["master_key_file"] = str(master_path); master_id = ensure_master_key(master_path)
+    cfg["device"] = device_info(fingerprint_key(cfg))   # the id the ledger sees, keyed now that the master key is here
     json.dump(cfg, open(HOME / "config.json", "w", encoding="utf-8"), indent=1)
     probe = {"schema_version": "0.5", "agent_id": aid, "session_id": "stair:setup", "record_id": str(uuid.uuid4()), "behavior": "Other", "client_ts_utc": now_ms(),
              "executor": "det", "record_phase": "post_execution", "label": "stair.setup_probe",
-             "data": {"endpoint": cfg["endpoint"], "device": cfg["device"]["device_id"], "privacy_notice": cfg["privacy_notice"], "plugin": plugin_version()},
+             "data": {"endpoint": cfg["endpoint"], "device": cfg["device"]["device_id"], "privacy_notice": cfg["privacy_notice"], "plugin": plugin_version(), "account": account},
              "written_by": {"component": "stair", "credential": "owner_api_key"}, "classification": {"source": "instrumented", "mapper": "stair@0.3", "confidence": 1.0}}
     ok, failed = upload(cfg, [probe])
-    print(json.dumps({"ok": not failed, "agent_id": aid, "endpoint": cfg["endpoint"], "home": str(HOME), "device_id": cfg["device"]["device_id"],
-                      "encryption": "on" if master_id else "off", "master_key_id": master_id, "master_key_file": cfg.get("master_key_file"),
+    earlier = {"sessions_on_ledger": len(held), "readable_with_this_key": sum(1 for k in held if k.get("master_key_id") == master_id)} if account != "new" else {}
+    print(json.dumps({"ok": not failed, "account": account, "agent_id": aid, "agent_name": name, **earlier, "endpoint": cfg["endpoint"], "home": str(HOME),
+                      "device_id": cfg["device"]["device_id"], "encryption": "on" if master_id else "off", "master_key_id": master_id, "master_key_file": cfg.get("master_key_file"),
                       "privacy_notice_accepted": PRIVACY_NOTICE_VERSION, "owner": cfg.get("owner_email") or "anonymous",
                       **({"error": failed[0]["error"]} if failed else {})}))
     return 0 if not failed else 1
 
 def status(args):
-    cfg = load_config(); q = sum(1 for _ in open(QUEUE, encoding="utf-8")) if QUEUE.exists() else 0
+    cfg = load_config(); q = len(queued_lines())
     sp = sum(sum(1 for _ in open(HOME / f, encoding="utf-8")) for f in ("spool.jsonl", "spool.flushing.jsonl") if (HOME / f).exists())
     invalid = sum(1 for _ in open(HOME / "spool.invalid.jsonl", encoding="utf-8")) if (HOME / "spool.invalid.jsonl").exists() else 0
-    q += sum(sum(1 for _ in open(t, encoding="utf-8")) for t in QUEUE.parent.glob("events.*.taken")) if QUEUE.parent.exists() else 0
     states = list((HOME / "state").glob("*.json")) if (HOME / "state").exists() else []
     up = 0
     for s in states:
@@ -456,14 +707,31 @@ def status(args):
     command = {"path": str(cmd), "kind": "absent"}
     if cmd.is_symlink(): command["kind"] = "link to %s" % os.readlink(cmd)
     elif cmd.exists(): command["kind"] = "follows the installed version" if "stair-command" in cmd.read_text(errors="replace")[:300] else "other"
-    print(json.dumps({"ok": bool(cfg) and "error" not in enc, "configured": bool(cfg), "endpoint": cfg and cfg.get("endpoint"), "agent_id": cfg and cfg.get("agent_id"),
+    keys = {"owner_key": (HOME / "owner.key").exists(), "master_key": (HOME / "master.key").exists()}   # an uninstall leaves both
+    here, gone, this_waits = waiting(cfg, this_session()) if cfg else ([], [], False)
+    newer = installed_now()
+    print(json.dumps({"ok": bool(cfg) and "error" not in enc, "configured": bool(cfg), "keys": keys, "endpoint": cfg and cfg.get("endpoint"),
+                      "agent_id": cfg and cfg.get("agent_id"), "agent_name": cfg and cfg.get("agent_name"),
                       "transcripts": len(states), "records_uploaded": up, "queued_events": q, "spooled": sp, "set_aside": invalid, "home": str(HOME), "encryption": enc,
-                      "privacy_notice": (cfg or {}).get("privacy_notice"), "owner": (cfg or {}).get("owner_email") or ("anonymous" if cfg else None),
-                      "plugin": NAME + " " + plugin_version(), "channel": CHANNEL["STAIR_CHANNEL"], "notice_pending": NOTICE_PENDING.exists(),
+                      "privacy_notice": (cfg or {}).get("privacy_notice"), "privacy_notice_installed": PRIVACY_NOTICE_VERSION,
+                      "uploads_paused": bool(cfg) and bool(uploads_paused(cfg, fetch_notices(cfg, offline=True))), "waiting_sessions": len(here),
+                      "this_session_waiting": this_waits, "waiting_sessions_unavailable": len(gone),
+                      "excluded_folders": excluded_folders(), "owner": (cfg or {}).get("owner_email") or ("anonymous" if cfg else None),
+                      "plugin": NAME + " " + plugin_version(), "installed_now": newer, "reload_needed": bool(newer),
+                      "channel": CHANNEL["STAIR_CHANNEL"], "notice_pending": NOTICE_PENDING.exists(),
                       "environment": environment, "command": command}))
     return 0
 
 SPOOL_RETRY_EVERY_MS = 10 * 60 * 1000
+
+def note_uploaded(came_from, ok):
+    """What a retry got through counts as uploaded in its session's state, as if the first try had worked: the count stays right
+    and the session's next turn does not send it again. The caller holds the lock."""
+    by_session = {}
+    for record_id in ok:
+        if came_from.get(record_id): by_session.setdefault(came_from[record_id], set()).add(record_id)
+    for tp, ids in by_session.items():
+        st = load_state(tp); st["uploaded"] = sorted(set(st.get("uploaded", [])) | ids); save_state(st)
 
 def resend_spool(cfg):
     """Send the spool again; the caller holds the lock. What a stopped run left (spool.flushing.jsonl) goes too; what the
@@ -474,13 +742,15 @@ def resend_spool(cfg):
         p.unlink()
     if not flushing.exists(): return [], []
     items = [json.loads(l) for l in open(flushing, encoding="utf-8") if l.strip()]
+    came_from = {x["record"]["record_id"]: x.get("transcript") for x in items}
     try:
         ok, failed = upload(cfg, [x["record"] for x in items])
     except Exception:
         with open(p, "a", encoding="utf-8") as f: f.write(open(flushing, encoding="utf-8").read())
         flushing.unlink()
         raise
-    spool(failed); flushing.unlink()
+    note_uploaded(came_from, ok)
+    spool([dict(x, transcript=came_from.get(x["record"]["record_id"])) for x in failed]); flushing.unlink()
     return ok, failed
 
 def retry_spool(cfg):
@@ -492,7 +762,9 @@ def retry_spool(cfg):
         if now_ms() - int(mark.read_text() or 0) < SPOOL_RETRY_EVERY_MS: return
     except Exception: pass
     mark.write_text(str(now_ms()))
-    try: resend_spool(cfg)
+    try:
+        ok, failed = resend_spool(cfg)
+        print(json.dumps({"spool_retry": {"sent": len(ok), "failed": len(failed)}}))
     except Exception as e: log("spool-retry", e)
 
 def flush(args):
@@ -614,7 +886,7 @@ def viewer(args):
     #, never sent to the server), and the grant is recorded in the ledger. The link is opened in this machine's browser, or
     printed when this runs in a person's own terminal; never printed for an assistant. --no-key: the structure only."""
     cfg = load_config()
-    if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
+    if not cfg: print(json.dumps({"ok": False, "error": NOT_CONFIGURED})); return 1
     if args.base and args.save:
         cfg["viewer_url"] = args.base.rstrip("/"); json.dump(cfg, open(HOME / "config.json", "w", encoding="utf-8"), indent=1)
     base = (args.base or cfg.get("viewer_url") or cfg["endpoint"]).rstrip("/")
@@ -649,7 +921,7 @@ def viewer(args):
 def grants_cmd(args):
     """`grants`: the view grants of this account, newest first, without keys."""
     cfg = load_config()
-    if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
+    if not cfg: print(json.dumps({"ok": False, "error": NOT_CONFIGURED})); return 1
     r = owner_request(cfg, "GET", "/v1/view-grants", missing_ok=True)
     print(json.dumps({"ok": r is not None, "grants": (r or {}).get("grants", []), **({} if r is not None else {"error": "this ledger has no view grants yet"})}))
     return 0 if r is not None else 1
@@ -657,12 +929,13 @@ def grants_cmd(args):
 def revoke_cmd(args):
     """`revoke GRANT_ID`: end a view grant now; the ledger drops its keys and signs out the browsers it opened."""
     cfg = load_config()
-    if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
+    if not cfg: print(json.dumps({"ok": False, "error": NOT_CONFIGURED})); return 1
     r = owner_request(cfg, "DELETE", "/v1/view-grants/" + args.grant_id)
     print(json.dumps({"ok": bool(r.get("revoked")), "grant_id": args.grant_id})); return 0
 
-def owner_request(cfg, method, path, body=None, missing_ok=False):
-    """A request to the ledger as this owner, outside the SDK (the few owner-account calls). missing_ok: None on a 404."""
+def owner_request(cfg, method, path, body=None, missing_ok=False, refused=None):
+    """A request to the ledger as this owner, outside the SDK (the few owner-account calls). missing_ok: None on a 404.
+    refused: what to say when the ledger does not accept the key (401, 403)."""
     import urllib.request, urllib.error
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(cfg["endpoint"].rstrip("/") + path, data=data, method=method,
@@ -671,23 +944,52 @@ def owner_request(cfg, method, path, body=None, missing_ok=False):
         with urllib.request.urlopen(req, timeout=20) as res: return json.loads(res.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         if missing_ok and e.code == 404: return None
+        if refused and e.code in (401, 403): raise SystemExit("stair: " + refused)
         detail = e.read().decode("utf-8", "replace")[:300]
         try: detail = json.loads(detail).get("message") or detail
         except Exception: pass
         raise SystemExit("stair: the ledger answered %d: %s" % (e.code, detail))
+    except urllib.error.URLError as e:
+        raise SystemExit("stair: could not reach the ledger at %s (%s)" % (cfg["endpoint"], e.reason))
+
+def account_keys(cfg, agent_id=None):
+    """The wrapped data keys the ledger holds for this owner, or for one of its machines: one per recorded session, each
+    naming its machine (agent_id) and the master key that opens it (master_key_id). A ledger without content keys: none."""
+    out, after = [], None
+    while True:
+        page = owner_request(cfg, "GET", "/v1/content-keys?limit=1000%s%s" % ("&agent_id=" + agent_id if agent_id else "", "&after=" + after if after else ""), missing_ok=True)
+        if not page: return out
+        out += page.get("keys") or []
+        after = page.get("next_after")
+        if not after: return out
+
+def account_machines(cfg):
+    """The machines this owner's sessions came from, newest first: [{name, agent_id, last_session_at}]."""
+    last = {}
+    for k in account_keys(cfg):
+        if k.get("agent_id"): last[k["agent_id"]] = max(last.get(k["agent_id"], 0), k.get("created_at") or 0)
+    out = []
+    for aid, at in sorted(last.items(), key=lambda kv: -kv[1]):
+        a = owner_request(cfg, "GET", "/v1/agents/" + aid, missing_ok=True)
+        if a and a.get("name"): out.append({"name": a["name"], "agent_id": aid, "last_session_at": at})
+    return out
 
 def claim(args):
     """`claim EMAIL`: give this anonymous owner an e-mail, so the account can be found again and, later, recovered."""
     cfg = load_config()
-    if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
+    if not cfg: print(json.dumps({"ok": False, "error": NOT_CONFIGURED})); return 1
     r = owner_request(cfg, "PATCH", "/v1/owners/me", {"email": args.email.strip()})
     cfg["owner_email"] = r.get("email") or args.email.strip(); json.dump(cfg, open(HOME / "config.json", "w", encoding="utf-8"), indent=1)
     print(json.dumps({"ok": True, "owner_id": r.get("owner_id"), "email": cfg["owner_email"]})); return 0
 
 # ---------------------------------------------------------------- notices: what the plugin's makers want the person to know
 NOTICES_FILE = HOME / "notices.json"              # what was fetched, when, and which notices were shown
-NOTICE_PENDING = HOME / "notice.pending.json"      # the next SessionStart hook prints this and renames it
+NOTICE_PENDING = HOME / "notice.pending.json"      # the launcher says this at the next new session, then renames it
 NOTICE_SHOWN = HOME / "notice.shown.json"
+# Under HOME, for the launcher's reminder that uploads wait: the notice they wait for; "<notice> <until>" after the person chose
+# "Not now" (no reminder of it until then); "<notice> <when>" of the last reminder of it (one a day at most).
+NOTICE_PAUSED, NOTICE_LATER, NOTICE_REMINDED = "notice.paused", "notice.later", "notice.reminded"
+LATER_SECONDS = 7 * 24 * 3600
 NOTICES_EVERY_MS = 60 * 60 * 1000
 VERSION_RE = re.compile(r"\d+(\.\d+){1,3}")                    # what a plugin version in the notices file may look like
 def notice_key(v):
@@ -778,48 +1080,58 @@ def changes_file(mkt):
         return str(HERE.parents[3] / "marketplaces" / mkt / "plugins" / NAME / "CHANGES.md")
     return "https://github.com/StairAI/claude-plugins/blob/%s/plugins/%s/CHANGES.md" % ("staging" if NAME == "stair-dev" else "main", NAME)
 
-def render_pending(pending, paused):
-    """What the SessionStart hook prints. The person gets one line, which may quote the makers' words (systemMessage).
-    Claude gets only sentences built here from version numbers and kinds (additionalContext), never text from the notices
-    file: whoever can change that file could otherwise instruct every installed assistant without a release."""
-    if not pending and not paused: return None
+# What Claude is told of a held upload: a fact, never a task. Consent is asked only in a command the person types
+# (/stair:notice); a hook that has the model ask for consent cannot be told apart from an injected prompt. The launcher
+# (bin/stair) says it in these words at every session start, worked out from the version numbers alone.
+NOTICE_CONTEXT = ("Uploads are held until the person accepts privacy notice %s, which they do themselves by typing /%s:notice. "
+                  "If they ask about it, say so; do not ask for their consent or run anything for it yourself.")
+
+def render_pending(pending):
+    """What the launcher says of the makers' notices at the next new session (never at a resume, a /clear, a compaction or
+    a fork). The person gets one line, which may quote the makers' words ("message"); Claude gets only sentences built here
+    from version numbers and kinds ("context"), never text from the notices file: whoever can change that file could
+    otherwise instruct every installed assistant without a release. That uploads wait for a privacy notice is the
+    launcher's to say, from the versions: at most once a day, and not for a week after the person chose "Not now"."""
+    if not pending: return None
     mkt = "stair-ai-dev" if NAME == "stair-dev" else "stair-ai"
     update = "claude plugin marketplace update %s && claude plugin update %s@%s" % (mkt, NAME, mkt)
-    lines = []; ctx = ["Stair plugin (%s) notices for this machine, shown to the person as one line. Ask before running anything." % NAME]
+    lines, ctx = [], []
     for n in pending:
         kind = n.get("kind")
         if kind == "update":
             changes = n.get("changes") or []
             summary = str(changes[0].get("summary") or "").strip().rstrip(".") if changes else ""
-            lines.append("Stair: %s %s is available (you have %s)%s. Say \"update stair\" to update, or ask what changed." % (NAME, n["latest"], n["installed"], ": " + summary if summary else ""))
+            lines.append("%s: %s %s is available (you have %s)%s. Say \"update stair\" to update, or ask what changed." % (LABEL, NAME, n["latest"], n["installed"], ": " + summary if summary else ""))
             ctx.append("Update available: %s %s (installed: %s). If they want it, run `%s` (both, in this order: the first fetches the "
-                       "marketplace), then tell them the new version applies to sessions started after the update; the `%s` command and the "
-                       "plugin's Python environment follow by themselves." % (NAME, n["latest"], n["installed"], update, NAME))
+                       "marketplace); the `%s` command and the plugin's Python environment follow by themselves. This session keeps the "
+                       "version it started with, commands included, until the person types /reload-plugins in the prompt box, which only "
+                       "they can do (it is not available over Remote Control or on the phone, where starting a new session does the same); "
+                       "meanwhile its hooks hand what it records to the new version. So, as the next step of your plan after the update, "
+                       "ask them in one line to type it." % (NAME, n["latest"], n["installed"], update, NAME))
             ctx.append("If they ask what it changes: run only `claude plugin marketplace update %s`, then read the entries newer than %s in %s and "
                        "tell them in their language, anything starting with \"Privacy:\" or \"You do:\" first." % (mkt, n["installed"], changes_file(mkt)))
-        elif kind == "privacy":
-            v = n["privacy_notice_version"]
-            lines.append("Stair: the privacy notice changed (%s); recording is paused until you accept it.%s" % (v, " " + str(n["text"]) if n.get("text") else ""))
-            ctx.append("The privacy notice changed to version %s and uploads are paused until the person accepts it. If the installed PRIVACY.md is "
-                       "older, update the plugin first (`%s`, then a new session). Read PRIVACY.md from the plugin directory to them in their "
-                       "language, ask for consent, and only with a clear yes run `%s rl accept-notice %s`." % (v, update, NAME, v))
+        elif kind == "privacy":   # that uploads wait, and how to choose, the launcher says; the makers' words, if any, follow it
+            if n.get("text"): lines.append("%s: %s" % (LABEL, str(n["text"])))
         else:
-            lines.append("Stair: " + str(n.get("title") or "") + (": " + str(n["text"]) if n.get("text") else ""))
+            lines.append(LABEL + ": " + str(n.get("title") or "") + (": " + str(n["text"]) if n.get("text") else ""))
             ctx.append("The plugin's makers left the person a message, shown to them; you are not given its words.")
-    if paused and not any(n.get("kind") == "privacy" for n in pending):
-        lines.append("Stair: recording is paused until the new privacy notice (%s) is accepted." % paused["privacy_notice_version"])
-        ctx.append("Uploads are paused until the person accepts privacy notice %s: update the plugin if its PRIVACY.md is older (`%s`), read "
-                   "PRIVACY.md to them, and only with a clear yes run `%s rl accept-notice %s`." % (paused["privacy_notice_version"], update, NAME, paused["privacy_notice_version"]))
-    return {"ids": [n["id"] for n in pending], "for_version": plugin_version(), "systemMessage": " ".join(lines),
-            "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "\n".join(ctx)}}
+    return {"ids": [n["id"] for n in pending], "for_version": plugin_version(), "message": " ".join(lines), "context": "\n".join(ctx)}
 
 def refresh_notices(cfg, force=False, offline=False):
-    """After an upload run: record what was shown, fetch, and leave what should be said next for the SessionStart hook."""
+    """After an upload run: record what was shown, fetch, and leave for the launcher what to say at the next new session
+    (notice.pending.json, one key per line, which it reads in bash) and which privacy notice uploads wait for."""
     mark_shown()
     cache = fetch_notices(cfg, force=force, offline=offline)
-    out = render_pending(pending_notices(cfg, cache), uploads_paused(cfg, cache))
+    paused = uploads_paused(cfg, cache)
+    try:
+        if paused: HOME.mkdir(parents=True, exist_ok=True); (HOME / NOTICE_PAUSED).write_text(paused["privacy_notice_version"] + "\n", encoding="utf-8")
+        elif (HOME / NOTICE_PAUSED).exists(): (HOME / NOTICE_PAUSED).unlink()
+    except Exception as e: log("notices-paused", e)
+    out = render_pending(pending_notices(cfg, cache))
     if out:
-        NOTICE_PENDING.parent.mkdir(parents=True, exist_ok=True); json.dump(out, open(NOTICE_PENDING, "w", encoding="utf-8"), indent=1)
+        NOTICE_PENDING.parent.mkdir(parents=True, exist_ok=True); tmp = NOTICE_PENDING.with_name("notice.pending.tmp")
+        with open(tmp, "w", encoding="utf-8") as f: json.dump(out, f, indent=1)   # ASCII only: the launcher copies the strings into its JSON
+        os.replace(tmp, NOTICE_PENDING)
     elif NOTICE_PENDING.exists():
         NOTICE_PENDING.unlink()
     return out
@@ -834,23 +1146,185 @@ def notices_cmd(args):
                       "pending": pending_notices(cfg, cache), "uploads_paused": bool(uploads_paused(cfg, cache)), "seen": cache.get("seen") or []}, ensure_ascii=False, indent=1))
     return 0
 
+def skip_waiting(cfg, this=None):
+    """Leave out for good the sessions recorded under a notice not accepted yet, and the session asking (this) when it is
+    one of them: the person chose not to send them. What was recorded under a notice they had accepted stays queued."""
+    for _ in range(100):
+        lock = hold_lock()
+        if lock: break
+        time.sleep(0.1)
+    else: raise SystemExit("stair: a processor is at work; try again in a moment")
+    try:
+        lines, parts = take_queue(held_queue_dirs(cfg))
+        sessions = {(ev.get("payload") or {}).get("transcript_path") for ev in map(read_event, lines) if ev} - {None}
+        for tp in sorted(sessions | ({this} if this else set())):
+            st = load_state(tp); leave_out(st, None, "held for a notice, not sent by choice"); save_state(st)
+        for part in parts:
+            try: part.unlink()
+            except FileNotFoundError: pass
+    finally: lock.close()
+
 def accept_notice(args):
-    """`accept-notice VERSION`: the person read the current PRIVACY.md (its version must be the one installed) and accepts it."""
+    """`accept-notice VERSION [--skip-waiting]`: the person read the current notice (its version must be the one installed) and
+    accepts it. The sessions that waited meanwhile are released, and go when the processor next runs (at the end of this turn),
+    or, with --skip-waiting, left out for good; the session asking is one of them (this_session says so). Nothing is sent
+    here, and the numbers say so."""
     cfg = load_config()
-    if not cfg: print(json.dumps({"ok": False, "error": "not configured: run `stair rl setup` first"})); return 1
+    if not cfg: print(json.dumps({"ok": False, "error": NOT_CONFIGURED})); return 1
     if args.version != PRIVACY_NOTICE_VERSION:
         print(json.dumps({"ok": False, "error": "the installed plugin's notice is %s, not %s; update the plugin first, then read its PRIVACY.md" % (PRIVACY_NOTICE_VERSION, args.version)})); return 1
+    skip = getattr(args, "skip_waiting", False)
+    this = this_session()
+    here, gone, this_waits = waiting(cfg, this)
+    if skip: skip_waiting(cfg, this if this_waits else None)
+    count, unavailable = len(here), len(gone)
     cfg["privacy_notice"] = {"version": PRIVACY_NOTICE_VERSION, "accepted_at": now_ms()}
     json.dump(cfg, open(HOME / "config.json", "w", encoding="utf-8"), indent=1)
+    for f in (HOME / NOTICE_LATER, HOME / NOTICE_REMINDED):   # the reminder's state is of the notice just accepted
+        try: f.unlink()
+        except FileNotFoundError: pass
     refresh_notices(cfg, force=True)
-    print(json.dumps({"ok": True, "privacy_notice": cfg["privacy_notice"], "uploads_paused": False})); return 0
+    print(json.dumps({"ok": True, "privacy_notice": cfg["privacy_notice"], "uploads_paused": False,
+                      "waiting_sessions_released": 0 if skip else count, "waiting_sessions_left_out": count if skip else 0,
+                      "waiting_sessions_unavailable": unavailable,
+                      "this_session": ("left_out" if skip else "released") if this_waits else None})); return 0
+
+def notice_later(args):
+    """`notice-later`: the person chose "Not now" in /stair:notice. Nothing changes but the reminder: no line about this
+    notice at the start of a session for a week. Uploads stay held; /stair:notice brings them back to the choice any time."""
+    cfg = load_config()
+    if not cfg: print(json.dumps({"ok": False, "error": NOT_CONFIGURED})); return 1
+    paused = uploads_paused(cfg, fetch_notices(cfg, offline=True))
+    if not paused: print(json.dumps({"ok": True, "uploads_paused": False})); return 0
+    until = int(time.time()) + LATER_SECONDS
+    HOME.mkdir(parents=True, exist_ok=True)
+    (HOME / NOTICE_LATER).write_text("%s %d\n" % (paused["privacy_notice_version"], until), encoding="utf-8")
+    print(json.dumps({"ok": True, "uploads_paused": True, "privacy_notice": paused["privacy_notice_version"],
+                      "no_reminder_until": time.strftime("%Y-%m-%d", time.localtime(until))})); return 0
+
+def exclude_cmd(args):
+    """`exclude [FOLDER]`: leave a folder out (the current one by default). Sessions that work in it, or below it, are not
+    recorded from now on, the ones under way included; `include FOLDER` records new sessions there again."""
+    folders = excluded_folders()
+    if args.list: print(json.dumps({"ok": True, "excluded": folders})); return 0
+    given = os.path.abspath(os.path.expanduser(args.folder or os.getcwd()))
+    added = [d for d in dict.fromkeys([given, os.path.realpath(given)]) if d not in folders]   # as given (what the hooks see) and resolved
+    if added:
+        HOME.mkdir(parents=True, exist_ok=True); tmp = EXCLUDE.with_name("exclude.tmp")
+        tmp.write_text("".join(d + "\n" for d in folders + added), encoding="utf-8"); os.replace(tmp, EXCLUDE)
+    print(json.dumps({"ok": True, "excluded": folders + added, "added": given})); return 0
+
+def include_cmd(args):
+    folders = excluded_folders()
+    given = os.path.abspath(os.path.expanduser(args.folder))
+    gone = {given, os.path.realpath(given)}
+    keep = [d for d in folders if d not in gone and os.path.realpath(d) != os.path.realpath(given)]
+    if len(keep) == len(folders):
+        print(json.dumps({"ok": False, "error": "%s is not left out" % given, "excluded": folders})); return 1
+    tmp = EXCLUDE.with_name("exclude.tmp"); tmp.write_text("".join(d + "\n" for d in keep), encoding="utf-8"); os.replace(tmp, EXCLUDE)
+    print(json.dumps({"ok": True, "excluded": keep, "included": given, "note": "new sessions there are recorded; the ones left out stay out"})); return 0
+
+# ---------------------------------------------------------------- preview: what the ledger would get, built here, sent nowhere
+def claude_projects():
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")) / "projects"
+
+def latest_transcript():
+    """The session written to last on this machine: usually the one asking."""
+    found = []
+    for f in claude_projects().glob("*/*.jsonl"):
+        if f.name.startswith("agent-"): continue
+        try: found.append((f.stat().st_mtime, f))
+        except OSError: pass
+    return max(found)[1] if found else None
+
+def plan_uploads(record, encryption):
+    """What the SDK does to a record before it uploads it (the same steps, here, with nothing sent): each content position's
+    raw value becomes the reference its upload would produce, encrypted under the session's data key (in the clear for an
+    install set up with --plaintext, encryption None). Returns [(path, the bytes the upload would carry)]."""
+    from reasoning_ledger.content import content_slots, encode_content, is_content_ref, sha256_hex
+    from reasoning_ledger.encryption import ENCRYPTED_MEDIA_TYPE
+    out = []
+    for container, key, path in content_slots(record):
+        if is_content_ref(container[key]): continue
+        data, media_type = encode_content(container[key], path)
+        if encryption is not None:
+            sid = record.get("session_id")
+            data, enc = encryption.encrypt(sid if isinstance(sid, str) else None, data, media_type)
+            container[key] = {"sha256": sha256_hex(data), "bytes": len(data), "media_type": ENCRYPTED_MEDIA_TYPE, "enc": enc}
+        else:
+            container[key] = {"sha256": sha256_hex(data), "bytes": len(data), "media_type": media_type}
+        out.append((path, data))
+    return out
+
+SHOWN_RECORDS = 12   # one screen; --json has them all
+SHAPE_FIELDS = ("trigger_type", "action_type", "kind", "gate_kind", "disposition", "scope", "op", "effect", "label", "outcome", "error_type", "delegate_agent_id")
+
+def shape_of(r):
+    """One line of what the ledger reads in a record: its structure, never a word of the session (the mapper keeps those in
+    content positions)."""
+    bits = []
+    if (r.get("tool_meta") or {}).get("name"): bits.append(str(r["tool_meta"]["name"]))
+    bits += [str(r[k]) for k in SHAPE_FIELDS if isinstance(r.get(k), (str, int, float)) and r.get(k) != ""]
+    if isinstance(r.get("duration_ms"), (int, float)): bits.append("%.1f s" % (r["duration_ms"] / 1000))
+    mi = r.get("model_invocation") or {}
+    if mi.get("model_name"): bits.append(str(mi["model_name"]))
+    if mi.get("tokens_out"): bits.append("%s tokens out" % mi["tokens_out"])
+    if r.get("behavior") == "Planning": bits.append("%d steps" % len(r.get("steps") or []))
+    return " · ".join(bits)
+
+def preview(args):
+    """`preview [TRANSCRIPT]`: the last turn of a session (the newest on this machine by default) as the ledger would get it:
+    the readable shape of each record beside the encrypted objects that carry its words. Built with this machine's keys (a
+    throwaway key before setup) and sent nowhere."""
+    cfg = load_config() or {}
+    use_sdk_src(cfg)
+    from reasoning_ledger import ContentEncryption, load_master_key
+    tp = Path(os.path.expanduser(args.transcript)) if args.transcript else latest_transcript()
+    if not tp or not tp.exists():
+        print(json.dumps({"ok": False, "error": "no Claude Code session found under %s" % claude_projects()})); return 1
+    agent = cfg.get("agent_id") or str(uuid.uuid5(uuid.NAMESPACE_URL, "stair-rl/dry"))
+    mk = master_key_path(cfg)
+    clear = bool(cfg) and mk is None                      # set up with --plaintext: the words go in the clear
+    master = load_master_key(mk) if mk and mk.exists() else os.urandom(32)   # before setup: a throwaway key, kept nowhere
+    fk = None if clear else derive_fingerprint_key(master)
+    set_fingerprint_key(fk)
+    mp = Mapper(agent, cfg.get("device") or device_info(fk), thinking_text=cfg.get("thinking_text", "hash"))
+    records, info = mp.map_transcript(str(tp), tp.stem)
+    left = load_state(tp).get("excluded") or next(({"folder": d} for d in (excluded_by(c, excluded_folders()) for c in info.get("cwds") or []) if d), None)
+    if left:
+        print(json.dumps({"ok": True, "transcript": str(tp), "excluded": True, "sent": False,
+                          "note": "this session is left out: nothing of it is sent"})); return 0
+    turns = sorted({int(m.group(1)) for r in records for m in [re.search(r":t(\d+)$", str(r.get("session_id") or ""))] if m and ":sub:" not in str(r.get("session_id"))})
+    keep = set(turns[-max(1, args.turns):])
+    chosen = [strip_none(json.loads(json.dumps(r))) for r in records
+              if (m := re.search(r":t(\d+)$", str(r.get("session_id") or ""))) and int(m.group(1)) in keep and ":sub:" not in str(r.get("session_id"))]
+    enc = None if clear else ContentEncryption(master_key=master, agent_id=agent)
+    planned = [(r, plan_uploads(r, enc)) for r in chosen]
+    if args.json:
+        print(json.dumps({"ok": True, "sent": False, "transcript": str(tp), "turns": sorted(keep), "records": [r for r, _ in planned],
+                          "encrypted": [{"record_id": r["record_id"], "path": path, "bytes": len(data), "ciphertext_head": data[:24].hex()}
+                                        for r, ups in planned for path, data in ups]}, ensure_ascii=False, indent=1)); return 0
+    width = max([len(r["behavior"]) for r, _ in planned] or [8])
+    print("Stair preview: the last %s of session %s as the ledger would get it. Nothing was sent." % ("turn" if len(keep) == 1 else "%d turns" % len(keep), tp.stem[:8]))
+    print("Each line: what the ledger reads, then %s.\n" % ("the words, which this install sends in the clear (set up with --plaintext)" if clear
+                                                      else "what it stores encrypted (only your master key opens it)"))
+    shown = planned[:SHOWN_RECORDS]
+    for r, ups in shown:
+        sealed = "; ".join("%s %d bytes %s…" % (path.rsplit(".", 1)[-1], len(data), data[:6].hex()) for path, data in ups)
+        print("  %-*s  %s%s" % (width, r["behavior"], shape_of(r) or "-", ("   | %s: %s" % ("in the clear" if clear else "encrypted", sealed)) if sealed else ""))
+    rest = collections.Counter(r["behavior"] for r, _ in planned[SHOWN_RECORDS:])
+    if rest: print("  … and %d more like these: %s" % (sum(rest.values()), ", ".join("%d %s" % (n, b) for b, n in rest.most_common())))
+    parts = [d for _, ups in planned for _, d in ups]
+    print("\n%d records, %d %s parts (%d bytes). `%s rl preview --json` shows the records in full, as they would be sent."
+          % (len(planned), len(parts), "plain" if clear else "encrypted", sum(len(d) for d in parts), NAME))
+    return 0
 
 def key_cmd(args):
     """`key rotate`: a new master key. Every wrapped session key the ledger holds for this owner is unwrapped with the old
     key, wrapped with the new one and registered again under the same id; then the new key replaces the file (the old one
     stays as master.key.old until you delete it). `key id` prints the current key's id."""
     cfg = load_config()
-    if not cfg or not master_key_path(cfg): print(json.dumps({"ok": False, "error": "no content master key: run `stair rl setup` first"})); return 1
+    if not cfg or not master_key_path(cfg): print(json.dumps({"ok": False, "error": "no content master key: run `%s rl setup` first" % NAME})); return 1
     use_sdk_src(cfg)
     from reasoning_ledger import ContentEncryption, generate_master_key, load_master_key, master_key_id, save_master_key
     path = master_key_path(cfg); old = load_master_key(path)
@@ -916,13 +1390,15 @@ def map_cmd(args):
     return 0
 
 def main():
-    ap = argparse.ArgumentParser(prog="stair rl"); sub = ap.add_subparsers(dest="cmd")
+    ap = argparse.ArgumentParser(prog=NAME + " rl"); sub = ap.add_subparsers(dest="cmd")
     p = sub.add_parser("process"); p.add_argument("--delay", type=float, default=1.5)
-    s = sub.add_parser("setup"); s.add_argument("--endpoint", default=CHANNEL["STAIR_DEFAULT_ENDPOINT"], help="the ledger to write to (default: this channel's, %s)" % CHANNEL["STAIR_DEFAULT_ENDPOINT"]); s.add_argument("--agent-name", required=True)
+    s = sub.add_parser("setup"); s.add_argument("--endpoint", default=CHANNEL["STAIR_DEFAULT_ENDPOINT"], help="the ledger to write to (default: this channel's, %s)" % CHANNEL["STAIR_DEFAULT_ENDPOINT"]); s.add_argument("--agent-name", default=None, help="a short name for this machine, stored as it is and readable on the ledger (default for a new account: %s; reconnecting, setup keeps the earlier one)" % default_agent_name())
     s.add_argument("--api-key-file", default=None, help="file holding the owner key you were given")
     s.add_argument("--register", default=None, nargs="?", const="", metavar="EMAIL", help="create an owner on the ledger (the default when this machine has no owner key yet): anonymous, or for this e-mail; the key is saved to $STAIR_HOME/owner.key")
     s.add_argument("--registration-token-file", default=None, help="for an instance without self-service: file holding its registration token (or set STAIR_REGISTRATION_TOKEN)")
-    s.add_argument("--force", action="store_true", help="with --register: replace an existing owner.key")
+    s.add_argument("--restore", default=None, metavar="FOLDER", help="reconnect the account whose keys you kept: the folder holding owner.key and master.key (a copy of $STAIR_HOME, say); no invite code needed")
+    s.add_argument("--new-master-key", action="store_true", help="start a new content master key for an earlier account whose key is lost; its earlier sessions stay unreadable")
+    s.add_argument("--force", action="store_true", help="with --register or --restore: replace a different key here; it is moved to <name>.replaced-<time>, never deleted")
     s.add_argument("--invite", default=None, metavar="CODE", help="with --register on a ledger that registers by invitation: your invite code (or set STAIR_INVITE_CODE); kept in config.json")
     s.add_argument("--plaintext", action="store_true", help="upload content in the clear instead of encrypting it on this machine (not for the hosted ledger)")
     s.add_argument("--accept-privacy-notice", default=None, metavar="VERSION", help="the version of PRIVACY.md the person has read and accepts (currently %s); without it setup prints the notice and stops" % PRIVACY_NOTICE_VERSION)
@@ -939,6 +1415,13 @@ def main():
     c = sub.add_parser("claim", help="give this anonymous owner an e-mail"); c.add_argument("email")
     n = sub.add_parser("notices", help="what the plugin's makers want you to know"); n.add_argument("--fetch", action="store_true", help="fetch now instead of using the hourly cache"); n.add_argument("--rebuild", action="store_true", help="write the next session's notice again from what was last fetched, without the network")
     acc = sub.add_parser("accept-notice", help="accept the current privacy notice after reading PRIVACY.md"); acc.add_argument("version")
+    acc.add_argument("--skip-waiting", action="store_true", help="leave out for good the sessions queued while uploads were held, instead of sending them")
+    sub.add_parser("notice-later", help="the person chose \"Not now\": no reminder of this notice at the start of a session for a week")
+    ex = sub.add_parser("exclude", help="leave a folder out: sessions that work in it are not recorded"); ex.add_argument("folder", nargs="?", default=None, help="the folder (default: the current one)")
+    ex.add_argument("--list", action="store_true", help="list the folders left out")
+    inc = sub.add_parser("include", help="record new sessions in a folder left out before"); inc.add_argument("folder")
+    pv = sub.add_parser("preview", help="the last turn of a session as the ledger would get it; sends nothing"); pv.add_argument("transcript", nargs="?", default=None, help="a transcript (default: the newest session on this machine)")
+    pv.add_argument("--turns", type=int, default=1, help="how many of the last turns (default 1)"); pv.add_argument("--json", action="store_true", help="the records in full, as they would be sent")
     ad = sub.add_parser("admin", help="operator commands, with the ledger's administrator token"); adsub = ad.add_subparsers(dest="admin_cmd")
     for name in ("new", "list", "revoke"):
         sp = adsub.add_parser(name); sp.set_defaults(admin_cmd=name)
@@ -950,7 +1433,8 @@ def main():
     ad.add_argument("what", nargs="?", default="invites", help=argparse.SUPPRESS)
     a = ap.parse_args()
     fn = {"process": process, "setup": setup, "status": status, "flush": flush, "map": map_cmd, "viewer": viewer, "key": key_cmd, "admin": admin_cmd,
-          "claim": claim, "notices": notices_cmd, "accept-notice": accept_notice, "grants": grants_cmd, "revoke": revoke_cmd}.get(a.cmd)
+          "claim": claim, "notices": notices_cmd, "accept-notice": accept_notice, "notice-later": notice_later, "grants": grants_cmd, "revoke": revoke_cmd,
+          "exclude": exclude_cmd, "include": include_cmd, "preview": preview}.get(a.cmd)
     if fn is None: ap.print_help(); return 1
     return fn(a)
 

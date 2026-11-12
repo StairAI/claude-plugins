@@ -1,7 +1,7 @@
 {
   "name": "stair",
-  "version": "0.13.1",
-  "description": "Stair for Claude Code: keeps a record of your sessions in a Reasoning Ledger you own (tool calls, questions and answers, decisions, outcomes; schema 0.5), encrypted on your machine with a key only you hold. Hooks mark the moments; a background processor maps the transcript and uploads in batches. Nothing is asked of the model.",
+  "version": "0.16.1",
+  "description": "Keep your AI sessions in a ledger only you hold the key to. Stair for Claude Code keeps a record of each session you run, in a ledger you own and hold the key to. You can open your record at any time. You will choose what to share, and what you share will become consumer intelligence for brands, research teams and funds; you will be paid as it is used.",
   "author": {
     "name": "Stair AI"
   }

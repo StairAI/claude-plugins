@@ -3,12 +3,12 @@
   "owner": {
     "name": "Stair AI"
   },
-  "description": "Stair AI plugins: write your agent's behavior into a Reasoning Ledger you own.",
+  "description": "Stair AI's plugins: Stair for Claude Code. Keep your AI sessions in a ledger only you hold the key to.",
   "plugins": [
     {
       "name": "stair",
       "source": "./plugins/stair",
-      "description": "Keeps a record of your Claude Code sessions in a Reasoning Ledger you own, encrypted on your machine: tool calls, questions and answers, decisions, outcomes (schema 0.5). Nothing is asked of the model."
+      "description": "Keep your AI sessions in a ledger only you hold the key to. Stair for Claude Code keeps a record of each session you run, in a ledger you own and hold the key to. You can open your record at any time. You will choose what to share, and what you share will become consumer intelligence for brands, research teams and funds; you will be paid as it is used."
     }
   ]
 }

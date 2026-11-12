@@ -1,6 +1,6 @@
 # Installing Stair for Claude Code
 
-These are instructions for the assistant. A person has asked you to install Stair, a Claude Code plugin that keeps a record of their sessions in a Reasoning Ledger they own, with the text encrypted on their machine. Do the steps in order; ask before each command the first time; do not skip the review or the consent.
+These are instructions for the assistant. A person has asked you to install Stair, a Claude Code plugin that keeps a record of their sessions in an account of theirs, with the text encrypted on their machine. Do the steps in order; ask before each command the first time; do not skip the review or the question.
 
 ## 1. Install the plugin
 
@@ -15,22 +15,20 @@ If the marketplace was added before, the first command says so; then run `claude
 
 ## 2. Follow the plugin's own install command
 
-The plugin is now at the newest directory under `~/.claude/plugins/cache/stair-ai/stair/` (`~/.claude/plugins/cache/stair-ai/stair/<version>/`, the highest version there). Read `commands/install.md` in that directory and follow it exactly. It has you:
+The plugin is now at the newest directory under `~/.claude/plugins/cache/stair-ai/stair/` (`~/.claude/plugins/cache/stair-ai/stair/<version>/`, the highest version there). Read `commands/install.md` in that directory and follow it exactly. The person sees three short steps; it has you:
 
-1. read the plugin's code (`bin/stair`, `hooks/hooks.json`, `rl_plugin.py`, `mapper.py`), tell the person what it does, what it reads, and where it sends data, and note the version you reviewed;
-2. explain the privacy notice (`PRIVACY.md`) in the person's language, with its full meaning;
-3. ask for their consent to notice version `2026-10-30.2`, and stop without a clear yes;
-4. ask for a short name for this machine (it is readable on the ledger) and their invite code (they may have given it in their message); no e-mail is needed, the account is anonymous and its keys are its identity; check the version again, and if it changed, review what changed first; then run the setup command with `--accept-privacy-notice 2026-10-30.2`;
-5. tell them to back up `~/.stair/master.key` and `~/.stair/owner.key`, that recording starts with the next session (or `/reload-plugins`), that `stair rl viewer` opens their records, and that `stair rl claim you@example.com` attaches an e-mail whenever they want one.
+1. read the plugin's code and its privacy notice (`PRIVACY.md`), then tell the person in three lines what it reads, where it sends data, and whether anything looks wrong;
+2. show the notice's short version exactly as written, after the line "Nothing has been sent yet.", and ask one question, "Start recording from your next session?", with neither answer marked as recommended; stop without a clear yes;
+3. run setup with their invite code (they may have given it in their message) and `--accept-privacy-notice 2026-11-12`: no e-mail and no machine name are needed (the machine is named after its kind unless they want another name); a machine that still has Stair's keys from an earlier install, or keys the person kept in a folder, reconnects that account instead (`--restore FOLDER`; never ask for the keys themselves); then say in two lines that the account is made and that the two key files are their account, to keep a copy of.
 
 The endpoint is `https://api.stair-ai.com` unless the person says otherwise.
 
 ## 3. Finish
 
-Say in two lines what was done: that an anonymous account was created, the machine's agent name, and that nothing is read from the machine except the transcripts Claude Code writes. From then on, at the start of a session, the plugin may leave a one-line notice from its makers (a new version, a changed privacy notice); relay it and ask before acting on it. Offer to put the `stair` command on their PATH (a small script in `~/.local/bin` that always runs the installed version, so updates need nothing more):
+Offer to put the `stair` command on their PATH (a small script in `~/.local/bin` that always runs the installed version, so updates need nothing more):
 
 ```
 "$HOME/.claude/plugins/cache/stair-ai/stair/$(ls ~/.claude/plugins/cache/stair-ai/stair | sort -V | tail -1)/bin/stair" link
 ```
 
-If anything fails, show the person the exact error and stop; do not retry with other values on your own.
+From then on, the plugin can show the person a one-line notice at the start of a session, about a new version or a changed privacy notice. It speaks to them directly and they choose; a changed notice they accept by typing `/stair:notice` themselves. If anything fails, show the person the exact error and stop; do not retry with other values on your own.

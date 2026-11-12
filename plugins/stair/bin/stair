@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # stair: the launcher of the Stair plugin for Claude Code.
-#   stair rl <command>   the ledger: setup, status, viewer, flush, map, process, key, admin (the `rl` word may be left out)
+#   stair rl <command>   the ledger: setup, status, viewer, preview, exclude, include, flush, map, process, key, admin (the
+#                        `rl` word may be left out)
 #   stair access …       the account and the services it reaches: token (a short-lived token for one Stair service, for a
 #                        skill's script), me, admin (handles and grants). Plain python3 is enough: no SDK needed.
-#   stair hook <Event>   fast path, bash only: append the hook's JSON to the local queue; on Stop/SessionEnd start the
-#                        detached processor (which maps the transcript and uploads). Never blocks Claude Code for long.
-#   stair env            build the plugin's own Python environment with the ledger SDK in it (one per SDK version).
+#   stair hook <Event>   fast path, bash only: append the hook's JSON to the local queue (one per privacy notice), unless its
+#                        folder is left out; on Stop/SessionEnd start the detached processor (which maps the transcript and
+#                        uploads). Never blocks Claude Code for long. A version that is no longer the one installed (a
+#                        session opened before an update) hands the hook to the version installed now, which tells Claude,
+#                        once, that only the person can switch the session over (/reload-plugins).
+#   stair env            build the plugin's own Python environment with the ledger SDK in it (one per SDK version), and
+#                        remove those that another SDK's environment replaced more than a week ago.
 #   stair link [dir]     put the command on PATH (~/.local/bin/<name>): a small script that always runs the version
 #                        Claude Code has installed, so an update needs nothing more.
 #
@@ -13,6 +18,9 @@
 # built by `stair env`, by setup, or in the background when a new plugin version pins another SDK); a development
 # checkout of the ledger repository, only when $STAIR_SDK_SRC names its SDK.
 set -u
+# A hook that another version handed over (see `hook` below) is taken here and never handed on; what this starts does not
+# inherit the mark.
+HANDED_FROM="${STAIR_HANDED_FROM:-}"; unset STAIR_HANDED_FROM
 # The plugin's directory: where this launcher really is, through any symlink (the README links it into PATH).
 self="${BASH_SOURCE[0]}"
 while [ -L "$self" ]; do
@@ -26,6 +34,9 @@ if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then ROOT="$CLAUDE_PLUGIN_ROOT"; else ROOT=
 NAME="$(sed -n 's/^[[:space:]]*"name":[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/.claude-plugin/plugin.json" 2>/dev/null | head -n 1)"
 NAME="${NAME:-stair}"
 [ -f "$ROOT/channel.env" ] && . "$ROOT/channel.env"
+# Which channel speaks, at the start of every line the person is shown ("Stair" or "Stair staging"); it goes into JSON as is.
+LABEL="${STAIR_LABEL:-}"; [ -n "$LABEL" ] || { if [ "${STAIR_CHANNEL:-dev}" = release ]; then LABEL=Stair; else LABEL="Stair staging"; fi; }
+LABEL="$(printf '%s' "$LABEL" | tr -d '"\\\n')"
 # Run from anywhere but Claude Code's plugin cache (a source checkout, --plugin-dir, a directory marketplace), the plugin
 # keeps its state apart, so a development copy never shares a queue or an account with the installed one.
 case "$ROOT" in */plugins/cache/*) SRC_SUFFIX="" ;; *) SRC_SUFFIX="-src" ;; esac
@@ -36,8 +47,10 @@ if [ "$NAME" = stair ] && [ ! -e "$HOME_DIR" ] && [ -z "${STAIR_HOME:-}" ] && [ 
 # or a local path to the python-sdk directory). The channel sets the default: each published channel pins one (the
 # release channel a release tag, the staging channel a commit of develop); the source repository follows develop.
 SDK_SPEC="${STAIR_SDK_SPEC:-${STAIR_SDK_SPEC_DEFAULT:-reasoning-ledger @ git+https://github.com/StairAI/Reasoning-Ledger.git@develop#subdirectory=python-sdk}}"
-# One environment per SDK requirement: a plugin version that pins another SDK gets a fresh environment, built once,
-# and the others are removed then. `.ready` is written last, so a half-built environment is never used.
+# One environment per SDK requirement: a plugin version that pins another SDK gets a fresh environment, built once. The
+# ones it replaces are kept a week, so that a session opened before the update goes on with its own (rebuilding it would
+# remove the new one, and the two versions would take turns), and removed after. `.ready` is written last, so a
+# half-built environment is never used.
 VENV="$HOME_DIR/venv-$(printf '%s' "$SDK_SPEC" | cksum | cut -d ' ' -f 1)"
 export STAIR_HOME="$HOME_DIR" STAIR_PLUGIN_NAME="$NAME" STAIR_VENV="$VENV" STAIR_SDK_SPEC_WANTED="$SDK_SPEC"
 PY=""
@@ -46,6 +59,16 @@ elif [ -f "$VENV/.ready" ] && [ -x "$VENV/bin/python" ]; then PY="$VENV/bin/pyth
 elif [ -n "${STAIR_SDK_SRC:-}" ] && [ -d "$STAIR_SDK_SRC" ] && [ -x "$(dirname "$STAIR_SDK_SRC")/.venv/bin/python" ]; then
   PY="$(dirname "$STAIR_SDK_SRC")/.venv/bin/python"; export PYTHONPATH="$STAIR_SDK_SRC${PYTHONPATH:+:$PYTHONPATH}"
 fi
+KEEP_MIN=10080   # a week, in minutes: how long an environment stays after another SDK's environment replaced it
+replaced_long_ago() {   # is $1 another version's environment, replaced (marked `.replaced` when that happened) over a week ago?
+  [ "$1" != "$VENV" ] && [ -e "$1/.replaced" ] && [ -n "$(find "$1/.replaced" -mmin +"$KEEP_MIN" 2>/dev/null)" ]
+}
+prune_envs() {   # with the build lock held: remove the environments replaced over a week ago, never this version's own
+  local old
+  for old in "$HOME_DIR/venv" "$HOME_DIR"/venv-*; do
+    if replaced_long_ago "$old"; then rm -rf "$old" && echo "stair: removed $old, replaced over a week ago" >&2; fi
+  done
+}
 build_env() {   # the environment for $SDK_SPEC at $VENV: uv when present, python3 -m venv otherwise (needs Python 3.12+)
   mkdir -p "$HOME_DIR" || return 1
   local lock="$HOME_DIR/venv.lock" waited=0 rc=0 old base
@@ -55,7 +78,7 @@ build_env() {   # the environment for $SDK_SPEC at $VENV: uv when present, pytho
     [ "$waited" -ge 300 ] && { echo "stair: another process is still building the environment; try again later" >&2; return 1; }
     sleep 2; waited=$((waited + 2))
   done
-  if [ -f "$VENV/.ready" ] && "$VENV/bin/python" -c 'import reasoning_ledger' >/dev/null 2>&1; then rmdir "$lock" 2>/dev/null; return 0; fi
+  if [ -f "$VENV/.ready" ] && "$VENV/bin/python" -c 'import reasoning_ledger' >/dev/null 2>&1; then prune_envs; rmdir "$lock" 2>/dev/null; return 0; fi
   echo "stair: building the plugin's Python environment for $SDK_SPEC (about a minute, once per SDK version)" >&2
   rm -rf "$VENV"
   if command -v uv >/dev/null 2>&1; then
@@ -68,7 +91,10 @@ build_env() {   # the environment for $SDK_SPEC at $VENV: uv when present, pytho
   fi && "$VENV/bin/python" -c 'import reasoning_ledger' && printf '%s\n' "$SDK_SPEC" > "$VENV/.sdk-spec" && : > "$VENV/.ready"
   rc=$?
   if [ "$rc" -eq 0 ]; then
-    for old in "$HOME_DIR/venv" "$HOME_DIR"/venv-*; do if [ "$old" != "$VENV" ] && [ -d "$old" ]; then rm -rf "$old"; fi; done   # other SDK versions
+    for old in "$HOME_DIR/venv" "$HOME_DIR"/venv-*; do   # the other SDKs' environments: marked when first replaced, kept a week
+      if [ "$old" != "$VENV" ] && [ -d "$old" ] && [ ! -e "$old/.replaced" ]; then printf 'replaced by %s\n' "$SDK_SPEC" > "$old/.replaced"; fi
+    done
+    prune_envs
     echo "stair: environment ready at $VENV" >&2
   else rm -rf "$VENV"; fi
   rmdir "$lock" 2>/dev/null
@@ -80,11 +106,17 @@ detach() {   # run "$@" in the background, in a session of its own so that it ou
   elif command -v perl >/dev/null 2>&1; then ( nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or exit 127' "$@" >> "$HOME_DIR/logs/process.log" 2>&1 < /dev/null & ) 2>/dev/null
   else ( nohup "$@" >> "$HOME_DIR/logs/process.log" 2>&1 < /dev/null & ) 2>/dev/null; fi
 }
+MKT=stair-ai; [ "$NAME" = stair-dev ] && MKT=stair-ai-dev   # the marketplace this channel is installed from
+installed_root() {   # the version Claude Code has installed now, as installed_plugins.json records it; empty without a record.
+  local r                # (The command that write_command writes looks it up the same way: it runs on its own, so it has a copy.)
+  r="$(sed -n "s|.*\"installPath\": *\"\([^\"]*/$MKT/$NAME/[^\"]*\)\".*|\1|p" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/installed_plugins.json" 2>/dev/null | head -n 1)"
+  printf '%s' "${r%/}"
+}
 CMD_MARK="# stair-command 1"
 write_command() {   # $1: the file. Not a link into one version's directory but a script that finds the installed version
-  local mkt=stair-ai tmp="$1.tmp.$$"; [ "$NAME" = stair-dev ] && mkt=stair-ai-dev
+  local tmp="$1.tmp.$$"
   mkdir -p "$(dirname "$1")" || return 1
-  sed -e "s|@NAME@|$NAME|g" -e "s|@MKT@|$mkt|g" > "$tmp" <<'CMD' || return 1
+  sed -e "s|@NAME@|$NAME|g" -e "s|@MKT@|$MKT|g" > "$tmp" <<'CMD' || return 1
 #!/usr/bin/env bash
 # stair-command 1: runs the Stair plugin @NAME@ in the version Claude Code has installed now, so an update needs nothing
 # more. Written by `@NAME@ link`; delete this file to remove the command.
@@ -112,44 +144,157 @@ if [ "${1:-}" = "link" ]; then   # the command on PATH: refuses to replace a fil
   case ":$PATH:" in *":$(dirname "$dest"):"*) ;; *) echo "$NAME: $(dirname "$dest") is not on your PATH yet; add it in your shell profile" >&2 ;; esac
   exit 0
 fi
+notice_of() {   # the privacy notice of the plugin version in directory $1
+  sed -n '/^PRIVACY_NOTICE_VERSION = /{s/^PRIVACY_NOTICE_VERSION = "\([0-9][0-9.-]*\)".*/\1/p;q;}' "$1/rl_plugin.py" 2>/dev/null
+}
+version_of() {   # the version of the plugin in directory $1, as its plugin.json gives it
+  sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$1/.claude-plugin/plugin.json" 2>/dev/null | head -n 1 | tr -cd '0-9A-Za-z.+-'
+}
+accepted_notice() {   # the privacy notice the person accepted, from config.json
+  tr -d '\n' < "$HOME_DIR/config.json" 2>/dev/null | sed -n 's/.*"privacy_notice": *{[^}]*"version": *"\([^"]*\)".*/\1/p' | tr -cd '0-9.-'
+}
+switch_fact() {   # what Claude is told in a session that still runs version $1 while this one is installed: facts only
+  printf 'This session still runs %s %s, the version it started with; %s %s is installed now, and the hooks of this session already hand what it records to it. Its commands switch only when the person types /reload-plugins in the prompt box: only they can, and it is not available over Remote Control or on the phone, where starting a new session does the same.' \
+    "$NAME" "$1" "$NAME" "$(version_of "$ROOT")"
+}
+ask_reload() {   # a Stop hook handed over by the version a session opened before an update runs ($PAYLOAD, $HANDED_FROM): once
+  # per session and version, Claude is told what only the person can do and asks them in one line. Not while Claude is
+  # already continuing for a stop hook; nothing more when its last answer asked for the reload already, unless a changed
+  # notice is still to be said. The words are built here from version numbers; nothing in them comes from the network.
+  local sid mark asked=0 held=0 text
+  sid="$(printf '%s' "$PAYLOAD" | grep -o '"session_id" *: *"[A-Za-z0-9_-]*"' | head -n 1 | sed 's/.*"\([A-Za-z0-9_-]*\)"$/\1/')"
+  [ -n "$sid" ] || return 0
+  printf '%s' "$PAYLOAD" | grep -q '"stop_hook_active" *: *true' && return 0
+  mark="$HOME_DIR/reload.told/$sid-$(version_of "$ROOT")"
+  [ -e "$mark" ] && return 0
+  mkdir -p "$HOME_DIR/reload.told" 2>/dev/null || return 0
+  find "$HOME_DIR/reload.told" -type f -mtime +7 -exec rm -f {} + 2>/dev/null   # sessions told over a week ago
+  : > "$mark" 2>/dev/null || return 0
+  printf '%s' "$PAYLOAD" | grep -o -E '"last_assistant_message" *: *"([^"\\]|\\.)*"' | grep -q 'reload-plugins' && asked=1
+  [ -n "$notice" ] && older "$(accepted_notice)" "$notice" && held=1
+  [ "$asked" = 1 ] && [ "$held" = 0 ] && return 0
+  text="Stair plugin ($NAME): $(switch_fact "$(version_of "$HANDED_FROM")")"
+  [ "$asked" = 0 ] && text="$text Ask them in one line to type it, as the next step of your plan."
+  [ "$held" = 1 ] && text="$text Uploads are held until the person accepts privacy notice $notice, which they do themselves by typing /$NAME:notice in a session that runs the new version: say so in the same line; do not ask for their consent or run anything for it yourself."
+  printf '{"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": "%s"}}\n' "$text"
+}
+older() {   # is notice $1 older than notice $2? by date, then by the number after the dot (2026-10-30.10 after .2)
+  local d1="${1%%.*}" d2="${2%%.*}" n1 n2
+  n1="${1#"$d1"}"; n1="${n1#.}"; n2="${2#"$d2"}"; n2="${n2#.}"
+  case "$n1" in ''|*[!0-9]*) n1=0 ;; esac; case "$n2" in ''|*[!0-9]*) n2=0 ;; esac
+  [[ "$d1" < "$d2" ]] && return 0; [[ "$d1" > "$d2" ]] && return 1
+  [ "$((10#$n1))" -lt "$((10#$n2))" ]
+}
 if [ "${1:-}" = "hook" ]; then
   EVENT="${2:-unknown}"
   [ -f "$HOME_DIR/config.json" ] || exit 0          # not set up: do nothing, never break the session
+  notice="$(notice_of "$ROOT")"                      # this version's notice
+  # A session opened before an update runs the version it started with until the person types /reload-plugins. Its hooks
+  # go to the version installed now, as they came (the same arguments, the hook's JSON still unread on stdin): what the
+  # session records from then on is that version's to send, under its notice (held until the person accepts it, if it
+  # changed), no environment is built again for a version new sessions no longer run, and that version tells Claude, once,
+  # that only the person can switch the session over (ask_reload). Only an installed copy hands over, never a source
+  # checkout. Not to a version whose notice is older than this one's: what is recorded under a notice is never left to the
+  # processor of an earlier one. Once at most. (Before 0.16.1, only a version whose environment was gone handed over.)
+  if [ -z "$HANDED_FROM" ] && [ -z "$SRC_SUFFIX" ]; then
+    inst="$(installed_root)"
+    if [ -n "$inst" ] && [ -x "$inst/bin/stair" ] && [ "$(cd "$inst" 2>/dev/null && pwd -P)" != "$(cd "$ROOT" 2>/dev/null && pwd -P)" ]; then
+      theirs="$(notice_of "$inst")"
+      if [ -n "$theirs" ] && ! older "$theirs" "$notice"; then
+        case "$EVENT" in Stop|SessionEnd)            # once a turn: the log says why this version's processor no longer runs
+          mkdir -p "$HOME_DIR/logs" 2>/dev/null
+          printf '%s stair: %s is not the version installed now; its %s hook goes to %s\n' \
+            "$(date '+%Y-%m-%dT%H:%M:%S')" "$ROOT" "$EVENT" "$inst" >> "$HOME_DIR/logs/process.log" 2>/dev/null ;;
+        esac
+        shopt -s execfail                            # if it cannot be run after all, this version goes on by itself
+        CLAUDE_PLUGIN_ROOT="$inst" STAIR_HANDED_FROM="$ROOT" exec "$inst/bin/stair" "$@"
+        shopt -u execfail
+      fi
+    fi
+  fi
   if [ "$EVENT" = "SessionStart" ]; then
+    # Why the session starts, from the hook's JSON: startup (a new session), resume, clear, compact or fork. The person is
+    # told things only when a session starts anew; the other starts show nothing and tell Claude the facts again (a
+    # compaction or a /clear lost them). No source given (an older Claude Code): a new session.
+    src=""; [ -t 0 ] || src="$(cat | grep -o '"source" *: *"[a-z_]*"' | head -n 1 | sed 's/.*"\([a-z_]*\)"$/\1/')"
+    case "$src" in ''|startup) STARTUP=1 ;; *) STARTUP=0 ;; esac
     printf '%s\n' "$ROOT" > "$HOME_DIR/plugin_root" 2>/dev/null       # the version sessions run now: the command falls back to it
     if [ -L "$HOME/.local/bin/$NAME" ]; then                          # a command linked into one version's directory (before
       case "$(readlink "$HOME/.local/bin/$NAME")" in */plugins/cache/*/"$NAME"/*/bin/stair) write_command "$HOME/.local/bin/$NAME" 2>/dev/null ;; esac
     fi                                                                # 0.11.1) would stay behind: it becomes the script
-    if [ -z "$PY" ] && [ ! -d "$HOME_DIR/venv.lock" ]; then detach "$ROOT/bin/stair" env; fi   # a new SDK: build it before the turn ends
-    if [ -f "$HOME_DIR/notice.pending.json" ] && ! grep -q "\"for_version\": \"$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/.claude-plugin/plugin.json" | head -n 1)\"" "$HOME_DIR/notice.pending.json" 2>/dev/null; then
-      rm -f "$HOME_DIR/notice.pending.json"                           # another version wrote it: write it again for this one,
+    if [ ! -d "$HOME_DIR/venv.lock" ]; then
+      if [ -z "$PY" ]; then detach "$ROOT/bin/stair" env                 # a new SDK: build it before the turn ends
+      else for old in "$HOME_DIR/venv" "$HOME_DIR"/venv-*; do            # one replaced over a week ago: remove it
+        if replaced_long_ago "$old"; then detach "$ROOT/bin/stair" env; break; fi; done
+      fi
+    fi
+    P="$HOME_DIR/notice.pending.json"
+    if [ -f "$P" ] && ! grep -q "\"for_version\": \"$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/.claude-plugin/plugin.json" | head -n 1)\"" "$P" 2>/dev/null; then
+      rm -f "$P"                                                      # another version wrote it: write it again for this one,
       rp="$PY"; [ -n "$rp" ] || rp="$(command -v python3.12 || command -v python3.11 || true)"   # from what was last fetched
       [ -n "$rp" ] && "$rp" -P "$ROOT/rl_plugin.py" notices --rebuild >/dev/null 2>&1          # (no network)
     fi
-    if [ -f "$HOME_DIR/notice.pending.json" ]; then cat "$HOME_DIR/notice.pending.json"; mv -f "$HOME_DIR/notice.pending.json" "$HOME_DIR/notice.shown.json" 2>/dev/null; exit 0; fi   # what the makers left, once
-    # Nothing left to say, yet this plugin's own privacy notice is newer than the one accepted (after an update from a
-    # version that never fetched notices, say): recording is paused, so say so now, from the two version numbers alone,
-    # without the network or Python.
-    accepted="$(tr -d '\n' < "$HOME_DIR/config.json" 2>/dev/null | sed -n 's/.*"privacy_notice": *{[^}]*"version": *"\([^"]*\)".*/\1/p')"
-    notice="$(sed -n 's/^PRIVACY_NOTICE_VERSION = "\([0-9][0-9.-]*\)".*/\1/p' "$ROOT/rl_plugin.py" | head -n 1)"
-    older() {   # is notice $1 older than notice $2? by date, then by the number after the dot (2026-10-30.10 after .2)
-      local d1="${1%%.*}" d2="${2%%.*}" n1 n2
-      n1="${1#"$d1"}"; n1="${n1#.}"; n2="${2#"$d2"}"; n2="${n2#.}"
-      case "$n1" in ''|*[!0-9]*) n1=0 ;; esac; case "$n2" in ''|*[!0-9]*) n2=0 ;; esac
-      [[ "$d1" < "$d2" ]] && return 0; [[ "$d1" > "$d2" ]] && return 1
-      [ "$((10#$n1))" -lt "$((10#$n2))" ]
+    json_str() {   # the top-level string "$1" of the file $2, which the processor writes one key per line: still JSON-escaped
+      sed -n "s/^ \"$1\": \"\(.*\)\",\{0,1\}\$/\1/p" "$2" 2>/dev/null | head -n 1
     }
-    if [ -n "$notice" ] && older "$accepted" "$notice"; then
-      where="$(printf '%s' "$ROOT/PRIVACY.md" | sed 's/\\/\\\\/g; s/"/\\"/g')"
-      printf '{"systemMessage": "Stair: the privacy notice changed (%s); recording is paused until you accept it.", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "Stair plugin (%s): the privacy notice changed to version %s, and uploads are paused until the person accepts it. Read %s to them in their language, ask for consent, and only with a clear yes run `%s rl accept-notice %s`."}}\n' \
-        "$notice" "$NAME" "$notice" "$where" "$NAME" "$notice"
+    NL='\n'; DASH='\u2014'; line=""; ctx=""
+    # What the makers left (a new version, a message), written by the processor after its last run: said once, at the
+    # next new session; until then Claude is told of it at every start.
+    if [ -f "$P" ]; then
+      ctx="$(json_str context "$P")"
+      if [ "$STARTUP" = 1 ]; then line="$(json_str message "$P")"; mv -f "$P" "$HOME_DIR/notice.shown.json" 2>/dev/null; fi
     fi
+    # Uploads held for a privacy notice not accepted yet: this plugin's own, newer than the one accepted, or one the makers
+    # published (the processor leaves its version in notice.paused). Worked out here from the version numbers alone,
+    # without the network or Python. Claude is told the fact at every start and never asked to seek consent (a hook that
+    # did would look like an injected prompt); the person is told at a new session, at most once a day, and not for a
+    # week after choosing "Not now" in /<name>:notice.
+    accepted="$(accepted_notice)"
+    due() {   # may the person be reminded of notice $1 now? Not within a day of the last reminder of it, nor before the
+      local now v t; now="$(date +%s)"   # end of the week they asked for with "Not now"
+      v=""; t=""; [ -f "$HOME_DIR/notice.later" ] && read -r v t < "$HOME_DIR/notice.later"
+      case "$t" in ''|*[!0-9]*) t=0 ;; esac
+      [ "$v" = "$1" ] && [ "$t" -gt "$now" ] && return 1
+      v=""; t=""; [ -f "$HOME_DIR/notice.reminded" ] && read -r v t < "$HOME_DIR/notice.reminded"
+      case "$t" in ''|*[!0-9]*) t=0 ;; esac
+      [ "$v" = "$1" ] && [ $((now - t)) -lt 86400 ] && return 1
+      return 0
+    }
+    held=""
+    if [ -n "$notice" ] && older "$accepted" "$notice"; then held="$notice"
+    else
+      v="$(head -n 1 "$HOME_DIR/notice.paused" 2>/dev/null | tr -cd '0-9.-')"
+      if [ -n "$v" ] && older "$accepted" "$v"; then held="$v"; fi
+    fi
+    if [ -n "$held" ]; then
+      ctx="Uploads are held until the person accepts privacy notice $held, which they do themselves by typing /$NAME:notice. If they ask about it, say so; do not ask for their consent or run anything for it yourself.${ctx:+$NL$ctx}"
+      if [ "$STARTUP" = 1 ] && due "$held"; then
+        line="$LABEL: the privacy notice was updated. Your sessions stay on this machine until you choose $DASH type /$NAME:notice.${line:+ $line}"
+        printf '%s %s\n' "$held" "$(date +%s)" > "$HOME_DIR/notice.reminded" 2>/dev/null
+      fi
+    fi
+    # A session opened before an update, resumed, cleared or compacted since: Claude is told which version it runs.
+    if [ -n "$HANDED_FROM" ]; then ctx="$(switch_fact "$(version_of "$HANDED_FROM")")${ctx:+$NL$ctx}"; fi
+    [ -n "$line$ctx" ] || exit 0
+    ctx="Stair plugin ($NAME) notices for this machine. Ask before running anything.${ctx:+$NL$ctx}"
+    if [ -n "$line" ]; then printf '{"systemMessage": "%s", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "%s"}}\n' "$line" "$ctx"
+    else printf '{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "%s"}}\n' "$ctx"; fi
     exit 0
   fi
-  mkdir -p "$HOME_DIR/queue" "$HOME_DIR/logs" 2>/dev/null || exit 0   # the processor's log must have a directory, or the spawn below fails silently
   PAYLOAD="$(cat)"                                   # the hook's JSON on stdin
+  if [ -s "$HOME_DIR/exclude" ]; then                # folders left out (`stair rl exclude`): their sessions are not even queued
+    cwd="$(printf '%s' "$PAYLOAD" | grep -o '"cwd" *: *"[^"]*"' | head -n 1 | sed 's/^"cwd" *: *"//; s/"$//; s/\\\\/\\/g')"
+    if [ -n "$cwd" ]; then
+      while IFS= read -r d || [ -n "$d" ]; do
+        [ -n "$d" ] || continue
+        case "$cwd/" in "${d%/}"/*) exit 0 ;; esac
+      done < "$HOME_DIR/exclude"
+    fi                                               # (the processor checks again, resolving links, and marks the session)
+  fi
+  Q="$HOME_DIR/queue${notice:+/n-$notice}"           # one queue per notice: a processor of an earlier version never takes it
+  mkdir -p "$Q" "$HOME_DIR/logs" 2>/dev/null || exit 0   # the processor's log must have a directory, or the spawn below fails silently
   TS="$(date +%s%3N 2>/dev/null)"; case "$TS" in ''|*[!0-9]*) TS="$(date +%s)000" ;; esac   # macOS date has no %N
-  printf '{"event":"%s","ts":%s,"payload":%s}\n' "$EVENT" "$TS" "${PAYLOAD:-{\}}" >> "$HOME_DIR/queue/events.jsonl" 2>/dev/null
+  printf '{"event":"%s","ts":%s,"payload":%s}\n' "$EVENT" "$TS" "${PAYLOAD:-{\}}" >> "$Q/events.jsonl" 2>/dev/null
   case "$EVENT" in
     Stop|SessionEnd)
       if [ -f "$ROOT/rl_plugin.py" ]; then
@@ -157,8 +302,12 @@ if [ "${1:-}" = "hook" ]; then
         else detach "$ROOT/bin/stair" rl process; fi                  # no environment for this SDK yet: the launcher builds it first
       fi ;;
   esac
+  if [ "$EVENT" = Stop ] && [ -n "$HANDED_FROM" ]; then ask_reload; fi   # a session that still runs an earlier version
   exit 0
 fi
+# The version Claude Code has installed now: `rl status` and `access apps` say when a session runs another one, so that the
+# commands can ask the person to switch it over first.
+export STAIR_INSTALLED_ROOT="$(installed_root)"
 if [ "${1:-}" = "env" ]; then build_env; exit $?; fi
 if [ "${1:-}" = "access" ]; then
   shift
