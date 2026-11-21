@@ -1,7 +1,7 @@
 {
   "_about": "What the plugin's makers want people to know. The plugin fetches this file at most hourly and says what applies at the start of the next session; the person decides. latest_version and changes (from claude-code/CHANGES.md) are filled by publish.sh for the channel it publishes: stair on main, stair-dev on staging; each channel reads its own branch's copy. A notice: {id, kind: update|privacy|info, title, text, until?: YYYY-MM-DD, channel?: release|dev, privacy_notice_version?: for kind privacy}.",
   "latest_version": {
-    "stair": "0.16.1"
+    "stair": "0.17.1"
   },
   "notices": [
     {
@@ -12,13 +12,35 @@
       "text": "Fingerprints are now keyed, the makers' notices no longer reach Claude, the machine name is said to be readable, the viewer opens a limited, recorded grant instead of carrying your master key, and the notice says where that protection ends. Update the plugin, then type /stair:notice in a new session."
     },
     {
-      "id": "changes:0.16.1",
+      "id": "changes:0.17.1",
       "kind": "changes",
-      "title": "What's new in stair 0.16.1",
-      "text": "After an update, Claude asks you to switch an open session over, and what it records waits for the new privacy notice (2026-11-12). Details: https://github.com/StairAI/claude-plugins/blob/main/plugins/stair/CHANGES.md"
+      "title": "What's new in stair 0.17.1",
+      "text": "After an update, Claude asks you to reload an open session only when the privacy notice changed, and what the plugin keeps on this machine is readable by you alone. Details: https://github.com/StairAI/claude-plugins/blob/main/plugins/stair/CHANGES.md"
     }
   ],
   "changes": [
+    {
+      "version": "0.17.1",
+      "summary": "After an update, Claude asks you to reload an open session only when the privacy notice changed, and what the plugin keeps on this machine is readable by you alone.",
+      "you_do": [],
+      "items": [
+        "When an update leaves the notice as it was, Claude no longer asks you, in each open session, to type /reload-plugins. The session's hooks hand what it records to the new version anyway, and /stair:notice and /stair:app say so themselves when the session runs an earlier version.",
+        "/reload-plugins does not always switch an open session. If a command still says the session runs an earlier version after you reloaded, start a new session; what the session records is not affected either way.",
+        "The plugin's folder in your home directory (what waits to be sent, the logs, the settings) is now readable by you alone; before, it was often readable by every user of the machine. What waits to be sent no longer includes the text of Claude's last answer, which was never sent: the plugin only looked whether it asked you to reload.",
+        "Privacy: the notice is unchanged (version 2026-11-12)."
+      ]
+    },
+    {
+      "version": "0.17.0",
+      "summary": "Images that a tool returns, such as a screenshot or a picture Claude reads, stay on this machine.",
+      "you_do": [],
+      "items": [
+        "The record keeps, in each image's place, its type, its size and a fingerprint, the way it already does for thinking blocks; the picture itself is not sent. Text that a tool returns beside an image is sent as before, encrypted.",
+        "To send images as well, encrypted like the rest, set `\"image_content\": \"full\"` in the plugin's `config.json`.",
+        "On a busy machine we measured, such images were about two thirds of everything sent, by size, so sessions that look at screenshots now send much less.",
+        "Privacy: the notice is unchanged (version 2026-11-12). It says a tool call's output is recorded; images are now left out of it, which its next version will say."
+      ]
+    },
     {
       "version": "0.16.1",
       "summary": "After an update, Claude asks you to switch an open session over, and what it records waits for the new privacy notice (2026-11-12).",
@@ -130,25 +152,6 @@
       "items": [
         "Records that failed to upload for a passing reason, such as the network, are sent again by the plugin itself, at most every ten minutes.",
         "Privacy notice versions of the same day compare by number, so a tenth version of a day comes after the second."
-      ]
-    },
-    {
-      "version": "0.12.3",
-      "summary": "The first session after an update says when recording is paused for a privacy notice, even on a machine that never fetched one.",
-      "you_do": [],
-      "items": [
-        "Privacy: when the plugin's own privacy notice is newer than the one you accepted, recording pauses, and every session says so from its first turn until you accept it, without the network.",
-        "`stair rl flush` sends nothing while recording is paused, and when the ledger cannot be reached it keeps everything to retry; `stair rl status` counts it."
-      ]
-    },
-    {
-      "version": "0.12.2",
-      "summary": "Several sessions open at once no longer lose or repeat each other's records.",
-      "you_do": [],
-      "items": [
-        "With several Claude Code sessions open, the uploads after each turn no longer run over one another: one at a time takes the queue, moving it aside first, so an event that arrives meanwhile waits for the next round instead of being lost.",
-        "A record the ledger's rules rule out is set aside (`spool.invalid.jsonl`, counted in `stair rl status`) instead of being retried forever.",
-        "The plugin run from its source directory keeps its state apart (`~/.stair-dev-src`), so a development copy never shares a queue with the installed plugin."
       ]
     }
   ]

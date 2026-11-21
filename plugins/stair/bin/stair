@@ -18,6 +18,10 @@
 # built by `stair env`, by setup, or in the background when a new plugin version pins another SDK); a development
 # checkout of the ledger repository, only when $STAIR_SDK_SRC names its SDK.
 set -u
+# What this writes is for the person alone: the queue holds what a session recorded until it is sent, and the logs and
+# settings sit beside it. So files are made readable and writable by them only (0600, folders 0700), whatever the
+# system's umask; before 0.17.1 they were often readable by every user of the machine.
+umask 077
 # A hook that another version handed over (see `hook` below) is taken here and never handed on; what this starts does not
 # inherit the mark.
 HANDED_FROM="${STAIR_HANDED_FROM:-}"; unset STAIR_HANDED_FROM
@@ -154,14 +158,20 @@ accepted_notice() {   # the privacy notice the person accepted, from config.json
   tr -d '\n' < "$HOME_DIR/config.json" 2>/dev/null | sed -n 's/.*"privacy_notice": *{[^}]*"version": *"\([^"]*\)".*/\1/p' | tr -cd '0-9.-'
 }
 switch_fact() {   # what Claude is told in a session that still runs version $1 while this one is installed: facts only
-  printf 'This session still runs %s %s, the version it started with; %s %s is installed now, and the hooks of this session already hand what it records to it. Its commands switch only when the person types /reload-plugins in the prompt box: only they can, and it is not available over Remote Control or on the phone, where starting a new session does the same.' \
+  printf 'This session still runs %s %s, the version it started with; %s %s is installed now, and the hooks of this session already hand what it records to it. Its commands switch only when the person types /reload-plugins in the prompt box: only they can, and it is not available over Remote Control or on the phone, where starting a new session does the same. /reload-plugins does not always switch an open session; if a command still says it runs an earlier version afterwards, a new session does, and what this session records is not affected either way.' \
     "$NAME" "$1" "$NAME" "$(version_of "$ROOT")"
 }
-ask_reload() {   # a Stop hook handed over by the version a session opened before an update runs ($PAYLOAD, $HANDED_FROM): once
-  # per session and version, Claude is told what only the person can do and asks them in one line. Not while Claude is
-  # already continuing for a stop hook; nothing more when its last answer asked for the reload already, unless a changed
-  # notice is still to be said. The words are built here from version numbers; nothing in them comes from the network.
-  local sid mark asked=0 held=0 text
+ask_reload() {   # a Stop hook handed over by the version a session opened before an update runs ($PAYLOAD, $HANDED_FROM)
+  # Only when the update changed the privacy notice and the person has not accepted it yet: what the session records
+  # waits for that, and they accept it with the new version's /<name>:notice, so the session has to switch first. Then,
+  # once per session and version, Claude is told what only the person can do and asks them in one line; not while Claude
+  # is already continuing for a stop hook, and without the ask when its last answer asked for the reload already. When
+  # the notice did not change, nothing is said: the hooks hand everything over already, and the commands say themselves
+  # when the session runs an earlier version (`reload_needed`). 0.16.1 and 0.17.0 asked after every update, and
+  # /reload-plugins does not always switch an open session. The words are built here from version numbers; nothing in
+  # them comes from the network.
+  local sid mark asked=0 text
+  { [ -n "$notice" ] && older "$(accepted_notice)" "$notice"; } || return 0
   sid="$(printf '%s' "$PAYLOAD" | grep -o '"session_id" *: *"[A-Za-z0-9_-]*"' | head -n 1 | sed 's/.*"\([A-Za-z0-9_-]*\)"$/\1/')"
   [ -n "$sid" ] || return 0
   printf '%s' "$PAYLOAD" | grep -q '"stop_hook_active" *: *true' && return 0
@@ -171,11 +181,9 @@ ask_reload() {   # a Stop hook handed over by the version a session opened befor
   find "$HOME_DIR/reload.told" -type f -mtime +7 -exec rm -f {} + 2>/dev/null   # sessions told over a week ago
   : > "$mark" 2>/dev/null || return 0
   printf '%s' "$PAYLOAD" | grep -o -E '"last_assistant_message" *: *"([^"\\]|\\.)*"' | grep -q 'reload-plugins' && asked=1
-  [ -n "$notice" ] && older "$(accepted_notice)" "$notice" && held=1
-  [ "$asked" = 1 ] && [ "$held" = 0 ] && return 0
   text="Stair plugin ($NAME): $(switch_fact "$(version_of "$HANDED_FROM")")"
   [ "$asked" = 0 ] && text="$text Ask them in one line to type it, as the next step of your plan."
-  [ "$held" = 1 ] && text="$text Uploads are held until the person accepts privacy notice $notice, which they do themselves by typing /$NAME:notice in a session that runs the new version: say so in the same line; do not ask for their consent or run anything for it yourself."
+  text="$text Uploads are held until the person accepts privacy notice $notice, which they do themselves by typing /$NAME:notice in a session that runs the new version: say so in the same line; do not ask for their consent or run anything for it yourself."
   printf '{"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": "%s"}}\n' "$text"
 }
 older() {   # is notice $1 older than notice $2? by date, then by the number after the dot (2026-10-30.10 after .2)
@@ -188,6 +196,7 @@ older() {   # is notice $1 older than notice $2? by date, then by the number aft
 if [ "${1:-}" = "hook" ]; then
   EVENT="${2:-unknown}"
   [ -f "$HOME_DIR/config.json" ] || exit 0          # not set up: do nothing, never break the session
+  chmod go= "$HOME_DIR" 2>/dev/null                 # the person's alone, also when an earlier version made it more open
   notice="$(notice_of "$ROOT")"                      # this version's notice
   # A session opened before an update runs the version it started with until the person types /reload-plugins. Its hooks
   # go to the version installed now, as they came (the same arguments, the hook's JSON still unread on stdin): what the
@@ -294,7 +303,13 @@ if [ "${1:-}" = "hook" ]; then
   Q="$HOME_DIR/queue${notice:+/n-$notice}"           # one queue per notice: a processor of an earlier version never takes it
   mkdir -p "$Q" "$HOME_DIR/logs" 2>/dev/null || exit 0   # the processor's log must have a directory, or the spawn below fails silently
   TS="$(date +%s%3N 2>/dev/null)"; case "$TS" in ''|*[!0-9]*) TS="$(date +%s)000" ;; esac   # macOS date has no %N
-  printf '{"event":"%s","ts":%s,"payload":%s}\n' "$EVENT" "$TS" "${PAYLOAD:-{\}}" >> "$Q/events.jsonl" 2>/dev/null
+  QPAY="${PAYLOAD:-{\}}"   # as it came, but without the text of Claude's last answer (Stop, SubagentStop): nothing sends it,
+  case "$QPAY" in          # and only ask_reload looks at it, in $PAYLOAD. Before 0.17.1 the queue kept it in clear.
+    *'"last_assistant_message"'*)
+      QPAY="$(printf '%s' "$QPAY" | sed -E 's/"last_assistant_message"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"/"last_assistant_message":null/g')"
+      [ -n "$QPAY" ] || QPAY="${PAYLOAD:-{\}}" ;;
+  esac
+  printf '{"event":"%s","ts":%s,"payload":%s}\n' "$EVENT" "$TS" "$QPAY" >> "$Q/events.jsonl" 2>/dev/null
   case "$EVENT" in
     Stop|SessionEnd)
       if [ -f "$ROOT/rl_plugin.py" ]; then
