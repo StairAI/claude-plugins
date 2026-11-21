@@ -1107,7 +1107,9 @@ def render_pending(pending):
                        "version it started with, commands included, until the person types /reload-plugins in the prompt box, which only "
                        "they can do (it is not available over Remote Control or on the phone, where starting a new session does the same); "
                        "meanwhile its hooks hand what it records to the new version. So, as the next step of your plan after the update, "
-                       "ask them in one line to type it." % (NAME, n["latest"], n["installed"], update, NAME))
+                       "ask them in one line to type it. /reload-plugins does not always switch an open session; if a command still says it "
+                       "runs the earlier version afterwards, a new session does, and what the session records is not affected "
+                       "either way." % (NAME, n["latest"], n["installed"], update, NAME))
             ctx.append("If they ask what it changes: run only `claude plugin marketplace update %s`, then read the entries newer than %s in %s and "
                        "tell them in their language, anything starting with \"Privacy:\" or \"You do:\" first." % (mkt, n["installed"], changes_file(mkt)))
         elif kind == "privacy":   # that uploads wait, and how to choose, the launcher says; the makers' words, if any, follow it

@@ -2,6 +2,15 @@
 
 What each version of the Stair plugin for Claude Code changes for the person using it, newest first. When a newer version is out, the plugin says so at the start of a session together with the entries between your version and the new one, and Claude tells you more when you ask. A line that starts with "You do:" is something you have to do; it is said first.
 
+## 0.17.1
+
+After an update, Claude asks you to reload an open session only when the privacy notice changed, and what the plugin keeps on this machine is readable by you alone.
+
+- When an update leaves the notice as it was, Claude no longer asks you, in each open session, to type /reload-plugins. The session's hooks hand what it records to the new version anyway, and /stair-dev:notice and /stair-dev:app say so themselves when the session runs an earlier version.
+- /reload-plugins does not always switch an open session. If a command still says the session runs an earlier version after you reloaded, start a new session; what the session records is not affected either way.
+- The plugin's folder in your home directory (what waits to be sent, the logs, the settings) is now readable by you alone; before, it was often readable by every user of the machine. What waits to be sent no longer includes the text of Claude's last answer, which was never sent: the plugin only looked whether it asked you to reload.
+- Privacy: the notice is unchanged (version 2026-11-12).
+
 ## 0.17.0
 
 Images that a tool returns, such as a screenshot or a picture Claude reads, stay on this machine.
